@@ -565,6 +565,13 @@ pub(crate) fn plugin_thread_main(
                     f.run
                         .as_mut()
                         .map(|f| f.populate_run_plugin_if_needed(&plugin_aliases));
+                    // Mirror tab_layout's add_cwd_to_layout above. Without this,
+                    // floating panes fall through to default_shell.cwd in
+                    // pty::apply_run_instruction, which carries the prior
+                    // session's cwd instead of --cwd from the new session.
+                    if let Some(cwd) = cwd.as_ref() {
+                        f.add_cwd_to_layout(cwd);
+                    }
                 });
                 let extracted_run_instructions = tab_layout
                     .clone()
