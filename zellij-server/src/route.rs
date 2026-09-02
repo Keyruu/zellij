@@ -820,23 +820,43 @@ pub(crate) fn route_action(
             near_current_pane,
             no_focus,
             tab_id,
+            launch_or_focus,
         } => {
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
-            let client_tab_index_or_paneid =
-                new_pane_routing(no_focus, near_current_pane, tab_id, pane_id, client_id);
-            senders
-                .send_to_pty(PtyInstruction::SpawnTerminal(
-                    run_cmd,
-                    name,
-                    NewPanePlacement::Floating(floating_pane_coordinates),
-                    false,
-                    client_tab_index_or_paneid,
-                    Some(NotificationEnd::new(completion_tx)),
-                    false, // set_blocking
-                ))
-                .with_context(err_context)?;
+            // Scratchpad path: defer to screen so it can find an existing
+            // pane by name first and evict siblings. Spawn path stays direct.
+            if launch_or_focus {
+                senders
+                    .send_to_screen(ScreenInstruction::LaunchOrFocusFloatingPane {
+                        pane_name: name,
+                        command: run_command,
+                        coordinates: floating_pane_coordinates,
+                        client_id,
+                        completion_tx: Some(NotificationEnd::new(completion_tx)),
+                    })
+                    .with_context(err_context)?;
+            } else {
+                let run_cmd = run_command
+                    .map(|cmd| TerminalAction::RunCommand(cmd.into()))
+                    .or_else(|| default_shell.clone());
+                let client_tab_index_or_paneid = new_pane_routing(
+                    no_focus,
+                    near_current_pane,
+                    tab_id,
+                    pane_id,
+                    client_id,
+                );
+                senders
+                    .send_to_pty(PtyInstruction::SpawnTerminal(
+                        run_cmd,
+                        name,
+                        NewPanePlacement::Floating(floating_pane_coordinates),
+                        false,
+                        client_tab_index_or_paneid,
+                        Some(NotificationEnd::new(completion_tx)),
+                        false, // set_blocking
+                    ))
+                    .with_context(err_context)?;
+            }
         },
         Action::NewInPlacePane {
             command: run_command,

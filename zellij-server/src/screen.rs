@@ -48,7 +48,7 @@ use zellij_utils::data::{
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
-use zellij_utils::input::command::RunCommand;
+use zellij_utils::input::command::{RunCommand, RunCommandAction};
 use zellij_utils::input::config::Config;
 use zellij_utils::input::keybinds::{shortcut_for_action, Keybinds};
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
@@ -384,6 +384,17 @@ pub enum ScreenInstruction {
         client_id: ClientId,
         tab_id: Option<usize>,
         completion: Option<NotificationEnd>,
+    },
+    /// Scratchpad semantics for floating panes: focus an existing one by
+    /// pane_name (closing its floating-layer siblings) or spawn a fresh one
+    /// (also after evicting siblings). Falls back to a plain spawn if no
+    /// pane_name was provided.
+    LaunchOrFocusFloatingPane {
+        pane_name: Option<String>,
+        command: Option<RunCommandAction>,
+        coordinates: Option<FloatingPaneCoordinates>,
+        client_id: ClientId,
+        completion_tx: Option<NotificationEnd>,
     },
     WriteCharacter(
         Option<KeyWithModifier>,
@@ -987,6 +998,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::HideFloatingPanes { .. } => ScreenContext::HideFloatingPanes,
             ScreenInstruction::AreFloatingPanesVisible { .. } => {
                 ScreenContext::AreFloatingPanesVisible
+            },
+            ScreenInstruction::LaunchOrFocusFloatingPane { .. } => {
+                ScreenContext::LaunchOrFocusFloatingPane
             },
             ScreenInstruction::WriteCharacter(..) => ScreenContext::WriteCharacter,
             ScreenInstruction::Resize(.., strategy, _) => match strategy {
@@ -4779,6 +4793,105 @@ impl Screen {
         Ok(())
     }
 
+    /// Scratchpad semantics: either focus an existing floating pane with
+    /// `pane_name` (and evict siblings) or evict siblings and spawn one.
+    /// Scoped to the focused tab — cross-tab scratchpads are out of scope.
+    pub fn launch_or_focus_floating_pane(
+        &mut self,
+        pane_name: Option<String>,
+        command: Option<RunCommandAction>,
+        coordinates: Option<FloatingPaneCoordinates>,
+        client_id: ClientId,
+        completion_tx: &mut Option<NotificationEnd>,
+    ) -> Result<()> {
+        let tab_index = match self.active_tab_ids.get(&client_id).copied() {
+            Some(idx) => idx,
+            None => {
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_exit_status(1);
+                    c.set_error_message("No active tab for client".to_string());
+                }
+                return Ok(());
+            },
+        };
+        // Look up an existing floating pane by title in the current tab
+        // before mutating, so we don't close the one we're about to focus.
+        let existing = pane_name
+            .as_deref()
+            .and_then(|name| self.find_floating_pane_by_name(tab_index, name));
+        // Snapshot siblings before the mutable close loop.
+        let mut to_close: Vec<PaneId> = Vec::new();
+        if let Some(tab) = self.tabs.get(&tab_index) {
+            for (pane_id, _) in tab.get_floating_panes() {
+                if Some(*pane_id) != existing {
+                    to_close.push(*pane_id);
+                }
+            }
+        }
+        // Evict siblings first so a spawn or focus doesn't race with them.
+        for pane_id in to_close {
+            if let Some(tab) = self.tabs.get_mut(&tab_index) {
+                tab.close_pane(pane_id, false, None);
+            }
+        }
+        match existing {
+            Some(pane_id) => {
+                if let Some(tab) = self.tabs.get_mut(&tab_index) {
+                    tab.show_floating_panes();
+                    tab.focus_pane_with_id(pane_id, true, false, client_id)?;
+                    if let Some(c) = completion_tx.as_mut() {
+                        c.set_affected_pane_id(pane_id);
+                    }
+                }
+            },
+            None => {
+                // No pane yet — spawn one. Empty pane_name falls through to a
+                // plain spawn (no focus-on-duplicate possible), which matches
+                // the documented "no-op if no pane_name was given" behaviour.
+                // Pass None when no command was supplied — PTY fills the shell
+                // from its own defaults (which carry the correct cwd /
+                // use_terminal_title), rather than synthesizing one here from
+                // Screen.default_shell (a PathBuf without those fields).
+                let run_cmd = command.map(|c| TerminalAction::RunCommand(c.into()));
+                let routing = if let Some(tab) = self.tabs.get_mut(&tab_index) {
+                    tab.show_floating_panes();
+                    ClientTabIndexOrPaneId::TabIndex(tab_index)
+                } else {
+                    ClientTabIndexOrPaneId::ClientId(client_id)
+                };
+                self.bus
+                    .senders
+                    .send_to_pty(PtyInstruction::SpawnTerminal(
+                        run_cmd,
+                        pane_name,
+                        NewPanePlacement::Floating(coordinates),
+                        false,
+                        routing,
+                        completion_tx.take(),
+                        false, // set_blocking
+                    ))
+                    .with_context(|| {
+                        format!("failed to spawn scratchpad floating pane")
+                    })?;
+            },
+        }
+        Ok(())
+    }
+
+    fn find_floating_pane_by_name(
+        &self,
+        tab_index: usize,
+        pane_name: &str,
+    ) -> Option<PaneId> {
+        let tab = self.tabs.get(&tab_index)?;
+        for (pane_id, pane) in tab.get_floating_panes() {
+            if pane.current_title() == pane_name {
+                return Some(*pane_id);
+            }
+        }
+        None
+    }
+
     /// Creates a new [`Tab`] in this [`Screen`]
     pub fn new_tab(
         &mut self,
@@ -8541,6 +8654,22 @@ pub(crate) fn screen_thread_main(
                 completion,
             } => {
                 screen.are_floating_panes_visible_in_tab(client_id, tab_id, completion)?;
+            },
+            ScreenInstruction::LaunchOrFocusFloatingPane {
+                pane_name,
+                command,
+                coordinates,
+                client_id,
+                completion_tx,
+            } => {
+                let mut completion_tx = completion_tx;
+                screen.launch_or_focus_floating_pane(
+                    pane_name,
+                    command,
+                    coordinates,
+                    client_id,
+                    &mut completion_tx,
+                )?;
             },
             ScreenInstruction::WriteCharacter(
                 key_with_modifier,

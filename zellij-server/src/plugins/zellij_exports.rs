@@ -1802,6 +1802,7 @@ fn open_terminal_floating(
         near_current_pane: false,
         no_focus: false,
         tab_id: None,
+        launch_or_focus: false,
     };
     let result = apply_action!(action, error_msg, env);
 
@@ -2274,6 +2275,7 @@ fn open_command_pane_floating(
         near_current_pane: false,
         no_focus: false,
         tab_id: None,
+        launch_or_focus: false,
     };
     let result = apply_action!(action, error_msg, env);
 

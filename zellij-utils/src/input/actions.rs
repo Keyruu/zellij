@@ -312,6 +312,11 @@ pub enum Action {
         near_current_pane: bool,
         no_focus: bool,
         tab_id: Option<usize>,
+        /// Scratchpad semantics: focus an existing floating pane with the
+        /// same pane_name if one is open in the current tab, closing any
+        /// other floating panes; otherwise close the others and spawn.
+        /// No-op if no pane_name was given (behaves like a plain spawn).
+        launch_or_focus: bool,
     },
     /// Open a new tiled (embedded, non-floating) pane
     /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
@@ -1289,6 +1294,7 @@ impl Action {
                             near_current_pane,
                             no_focus,
                             tab_id,
+                            launch_or_focus: false,
                         }])
                     } else if in_place {
                         Ok(vec![Action::NewInPlacePane {
@@ -1330,6 +1336,7 @@ impl Action {
                             near_current_pane,
                             no_focus,
                             tab_id,
+                            launch_or_focus: false,
                         }])
                     } else if in_place {
                         Ok(vec![Action::NewInPlacePane {
