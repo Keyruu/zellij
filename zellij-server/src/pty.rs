@@ -70,7 +70,8 @@ pub enum PtyInstruction {
         ClientTabIndexOrPaneId,
         Option<NotificationEnd>, // completion signal
         bool,                    // set_blocking
-        Option<PaneId>,
+        Option<PaneId>,          // origin_pane_id
+        bool,                    // is_scratchpad
     ), // bool (if Some) is
     // should_float, String is an optional pane name
     OpenInPlaceEditor(
@@ -260,6 +261,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>, session_id: Str
                 completion_tx,
                 set_blocking,
                 origin_pane_id,
+                is_scratchpad,
             ) => {
                 let err_context =
                     || format!("failed to spawn terminal for {:?}", client_or_tab_index);
@@ -352,6 +354,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>, session_id: Str
                                 client_or_tab_index,
                                 completion_tx,
                                 set_blocking,
+                                is_scratchpad,
                             ))
                             .with_context(err_context)?;
                     },
@@ -371,6 +374,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>, session_id: Str
                                         client_or_tab_index,
                                         completion_tx,
                                         set_blocking,
+                                        false, // is_scratchpad
                                     ))
                                     .with_context(err_context)?;
                                 if let Some(run_command) = run_command {

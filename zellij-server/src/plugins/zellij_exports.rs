@@ -2313,6 +2313,7 @@ fn open_file_near_plugin(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     );
     let _ = env.senders.send_to_pty(pty_instr);
 
@@ -2361,6 +2362,7 @@ fn open_file_floating_near_plugin(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     );
     let _ = env.senders.send_to_pty(pty_instr);
 
@@ -2484,6 +2486,7 @@ fn open_terminal_near_plugin(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     ));
 
     // Wait for completion
@@ -2523,7 +2526,7 @@ fn open_terminal_floating(
         near_current_pane: false,
         no_focus: false,
         tab_id: None,
-        launch_or_focus: false,
+        scratchpad: false,
     };
     let result = apply_action!(action, error_msg, env);
 
@@ -2565,6 +2568,7 @@ fn open_terminal_floating_near_plugin(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     ));
 
     // Wait for completion
@@ -2962,6 +2966,7 @@ fn open_command_pane_near_plugin(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     ));
 
     // Wait for completion
@@ -3018,7 +3023,7 @@ fn open_command_pane_floating(
         near_current_pane: false,
         no_focus: false,
         tab_id: None,
-        launch_or_focus: false,
+        scratchpad: false,
     };
     let result = apply_action!(action, error_msg, env);
 
@@ -3081,6 +3086,7 @@ fn open_command_pane_floating_near_plugin(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     ));
 
     // Wait for completion
@@ -3198,6 +3204,7 @@ fn open_command_pane_background(
         Some(NotificationEnd::new(completion_tx)),
         false, // set_blocking
         None,
+        false, // is_scratchpad
     ));
 
     // Wait for completion

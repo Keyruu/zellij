@@ -2417,10 +2417,12 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                     },
                     None => None,
                 };
-                let launch_or_focus = command_metadata
-                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "launch_or_focus"))
+                let scratchpad = command_metadata
+                    .and_then(|c_m| kdl_child_bool_value_for_entry(c_m, "scratchpad"))
                     .unwrap_or(false);
-                if floating {
+                // A scratchpad is inherently a floating pane, so `scratchpad true`
+                // alone routes here without also requiring `floating true`.
+                if floating || scratchpad {
                     Ok(Action::NewFloatingPane {
                         command: Some(run_command_action),
                         pane_name: name,
@@ -2431,7 +2433,7 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
                         near_current_pane: false,
                         no_focus: false,
                         tab_id: None,
-                        launch_or_focus,
+                        scratchpad,
                     })
                 } else if in_place {
                     Ok(Action::NewInPlacePane {
