@@ -1042,7 +1042,7 @@ pub struct NewFloatingPaneAction {
     #[prost(bool, tag="9")]
     pub no_focus: bool,
     #[prost(bool, tag="10")]
-    pub launch_or_focus: bool,
+    pub scratchpad: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

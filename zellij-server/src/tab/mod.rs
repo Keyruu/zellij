@@ -849,6 +849,13 @@ pub trait Pane {
     fn start_loading_indication(&mut self, _loading_indication: LoadingIndication) {} // only relevant for plugins
     fn progress_animation_offset(&mut self) {} // only relevant for plugins
     fn current_title(&self) -> String;
+    /// True if this pane was spawned by a `scratchpad` keybind. Only
+    /// scratchpads evict each other on a new scratchpad invocation; regular
+    /// floating panes (e.g. layout-spawned `lazygit`) are left alone.
+    fn is_scratchpad(&self) -> bool {
+        false
+    }
+    fn set_is_scratchpad(&mut self, _val: bool) {}
     fn stack_list_entry_label(&self) -> String {
         self.current_title()
     }
@@ -2784,7 +2791,8 @@ impl Tab {
                         client_id_or_tab_index,
                         completion_tx,
                         false, // set_blocking
-                        None,
+                        None, // origin_pane_id
+                        false, // is_scratchpad
                     );
                     self.senders
                         .send_to_pty(instruction)
@@ -4490,6 +4498,21 @@ impl Tab {
             })
         {
             pane.set_is_nested_guest(is_nested_guest);
+        }
+    }
+    pub fn set_pane_is_scratchpad(&mut self, pane_id: PaneId, is_scratchpad: bool) {
+        if let Some(pane) = self
+            .tiled_panes
+            .get_pane_mut(pane_id)
+            .or_else(|| self.floating_panes.get_pane_mut(pane_id))
+            .or_else(|| {
+                self.suppressed_panes
+                    .values_mut()
+                    .find(|s_p| s_p.1.pid() == pane_id)
+                    .map(|s_p| &mut s_p.1)
+            })
+        {
+            pane.set_is_scratchpad(is_scratchpad);
         }
     }
     pub fn is_pane_nested_guest(&self, pane_id: PaneId) -> bool {
