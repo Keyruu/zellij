@@ -366,6 +366,7 @@ pub enum ScreenInstruction {
         ClientTabIndexOrPaneId,
         Option<NotificationEnd>, // completion signal
         bool,                    // set_blocking
+        bool, // is_scratchpad — mark the pane as a scratchpad on creation
     ),
     OpenInPlaceEditor(PaneId, ClientTabIndexOrPaneId),
     TogglePaneEmbedOrFloating(ClientId, Option<NotificationEnd>),
@@ -385,11 +386,11 @@ pub enum ScreenInstruction {
         tab_id: Option<usize>,
         completion: Option<NotificationEnd>,
     },
-    /// Scratchpad semantics for floating panes: focus an existing one by
-    /// pane_name (closing its floating-layer siblings) or spawn a fresh one
-    /// (also after evicting siblings). Falls back to a plain spawn if no
-    /// pane_name was provided.
-    LaunchOrFocusFloatingPane {
+    /// Scratchpad semantics for floating panes: focus an existing scratchpad
+    /// by pane_name (evicting sibling scratchpads), toggle it closed if it's
+    /// already focused, or spawn a fresh one (also after evicting siblings).
+    /// Falls back to a plain spawn if no pane_name was provided.
+    ScratchpadFloatingPane {
         pane_name: Option<String>,
         command: Option<RunCommandAction>,
         coordinates: Option<FloatingPaneCoordinates>,
@@ -999,8 +1000,8 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::AreFloatingPanesVisible { .. } => {
                 ScreenContext::AreFloatingPanesVisible
             },
-            ScreenInstruction::LaunchOrFocusFloatingPane { .. } => {
-                ScreenContext::LaunchOrFocusFloatingPane
+            ScreenInstruction::ScratchpadFloatingPane { .. } => {
+                ScreenContext::ScratchpadFloatingPane
             },
             ScreenInstruction::WriteCharacter(..) => ScreenContext::WriteCharacter,
             ScreenInstruction::Resize(.., strategy, _) => match strategy {
@@ -4796,7 +4797,7 @@ impl Screen {
     /// Scratchpad semantics: either focus an existing floating pane with
     /// `pane_name` (and evict siblings) or evict siblings and spawn one.
     /// Scoped to the focused tab — cross-tab scratchpads are out of scope.
-    pub fn launch_or_focus_floating_pane(
+    pub fn scratchpad_floating_pane(
         &mut self,
         pane_name: Option<String>,
         command: Option<RunCommandAction>,
@@ -4819,23 +4820,42 @@ impl Screen {
         let existing = pane_name
             .as_deref()
             .and_then(|name| self.find_floating_pane_by_name(tab_index, name));
-        // Snapshot siblings before the mutable close loop.
+        // Snapshot other scratchpads to evict. Only scratchpads count —
+        // regular floating panes (e.g. layout-spawned lazygit) keep
+        // showing. Exclude the pane we may focus, so we don't race the
+        // focus path with our own close.
         let mut to_close: Vec<PaneId> = Vec::new();
         if let Some(tab) = self.tabs.get(&tab_index) {
-            for (pane_id, _) in tab.get_floating_panes() {
-                if Some(*pane_id) != existing {
+            for (pane_id, pane) in tab.get_floating_panes() {
+                if Some(*pane_id) != existing && pane.is_scratchpad() {
                     to_close.push(*pane_id);
                 }
             }
         }
-        // Evict siblings first so a spawn or focus doesn't race with them.
+        // Detect toggle-off: if the existing scratchpad is the focused
+        // floating pane, close it instead of focusing. The eviction above
+        // already handled the sibling scratchpads.
+        let existing_is_focused = existing
+            .zip(self.tabs.get(&tab_index))
+            .and_then(|(pid, tab)| tab.get_active_pane(client_id).map(|p| p.pid() == pid))
+            .unwrap_or(false);
         for pane_id in to_close {
             if let Some(tab) = self.tabs.get_mut(&tab_index) {
                 tab.close_pane(pane_id, false, None);
             }
         }
-        match existing {
-            Some(pane_id) => {
+        match (existing, existing_is_focused) {
+            (Some(pane_id), true) => {
+                // Toggle off: close the focused scratchpad. Don't touch the
+                // floating layer visibility — other non-scratchpad floating
+                // panes (e.g. lazygit) may still be visible and the user
+                // might want them.
+                if let Some(tab) = self.tabs.get_mut(&tab_index) {
+                    tab.close_pane(pane_id, false, None);
+                }
+            },
+            (Some(pane_id), false) => {
+                // Already open but not focused: bring it forward.
                 if let Some(tab) = self.tabs.get_mut(&tab_index) {
                     tab.show_floating_panes();
                     tab.focus_pane_with_id(pane_id, true, false, client_id)?;
@@ -4844,7 +4864,7 @@ impl Screen {
                     }
                 }
             },
-            None => {
+            (None, _) => {
                 // No pane yet — spawn one. Empty pane_name falls through to a
                 // plain spawn (no focus-on-duplicate possible), which matches
                 // the documented "no-op if no pane_name was given" behaviour.
@@ -4869,6 +4889,7 @@ impl Screen {
                         routing,
                         completion_tx.take(),
                         false, // set_blocking
+                        true,  // is_scratchpad — this is the scratchpad spawn path
                     ))
                     .with_context(|| {
                         format!("failed to spawn scratchpad floating pane")
@@ -8414,10 +8435,20 @@ pub(crate) fn screen_thread_main(
                 client_or_tab_index,
                 mut completion_tx,
                 set_blocking,
+                is_scratchpad,
             ) => {
                 completion_tx.as_mut().map(|c| c.set_affected_pane_id(pid));
 
                 let blocking_notification = if set_blocking { completion_tx } else { None };
+
+                // Resolve the target tab up front so we can mark the pane as a
+                // scratchpad after the new_pane call below — the helper
+                // requires the flag to be on the Pane, not the layout.
+                let target_tab_index = match client_or_tab_index {
+                    ClientTabIndexOrPaneId::TabIndex(ti)
+                    | ClientTabIndexOrPaneId::TabIndexNoFocus(ti) => Some(ti),
+                    _ => None,
+                };
 
                 match client_or_tab_index {
                     ClientTabIndexOrPaneId::ClientId(client_id)
@@ -8565,6 +8596,24 @@ pub(crate) fn screen_thread_main(
                         screen.bus.senders.send_to_screen(event).non_fatal();
                     }
                 }
+                // Mark the pane as a scratchpad if requested. For ClientId
+                // routing the active tab may have shifted under us, so fall
+                // back to whichever tab contains the pane.
+                if is_scratchpad {
+                    let tab_to_mark = target_tab_index
+                        .or_else(|| {
+                            screen
+                                .tabs
+                                .iter()
+                                .find(|(_, tab)| tab.has_pane_with_pid(&pid))
+                                .map(|(idx, _)| *idx)
+                        });
+                    if let Some(tab_index) = tab_to_mark {
+                        if let Some(tab) = screen.tabs.get_mut(&tab_index) {
+                            tab.set_pane_is_scratchpad(pid, true);
+                        }
+                    }
+                }
                 screen.log_and_report_session_state()?;
 
                 screen.render(None)?;
@@ -8655,7 +8704,7 @@ pub(crate) fn screen_thread_main(
             } => {
                 screen.are_floating_panes_visible_in_tab(client_id, tab_id, completion)?;
             },
-            ScreenInstruction::LaunchOrFocusFloatingPane {
+            ScreenInstruction::ScratchpadFloatingPane {
                 pane_name,
                 command,
                 coordinates,
@@ -8663,7 +8712,7 @@ pub(crate) fn screen_thread_main(
                 completion_tx,
             } => {
                 let mut completion_tx = completion_tx;
-                screen.launch_or_focus_floating_pane(
+                screen.scratchpad_floating_pane(
                     pane_name,
                     command,
                     coordinates,

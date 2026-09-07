@@ -148,6 +148,7 @@ pub struct TerminalPane {
     exclude_from_sync: bool,
     fake_cursor_locations: HashSet<(usize, usize)>, // (x, y) - these hold a record of previous fake cursors which we need to clear on render
     search_term: String,
+    is_scratchpad: bool, // true if spawned via a scratchpad keybind; only scratchpads evict each other
     is_held: Option<(Option<i32>, IsFirstRun, RunCommand)>, // a "held" pane means that its command has either exited and the pane is waiting for a
     // possible user instruction to be re-run, or that the command has not yet been run
     banner: Option<String>, // a banner to be rendered inside this TerminalPane, used for panes
@@ -1158,6 +1159,12 @@ impl Pane for TerminalPane {
             self.pane_name.to_owned()
         }
     }
+    fn is_scratchpad(&self) -> bool {
+        self.is_scratchpad
+    }
+    fn set_is_scratchpad(&mut self, val: bool) {
+        self.is_scratchpad = val;
+    }
     fn stack_list_entry_label(&self) -> String {
         self.title_with_bell_indicator(self.current_title())
     }
@@ -1414,6 +1421,7 @@ impl TerminalPane {
             pane_title: initial_pane_title,
             pane_name: pane_name.clone(),
             prev_pane_name: pane_name,
+            is_scratchpad: false,
             borderless: false,
             exclude_from_sync: false,
             fake_cursor_locations: HashSet::new(),

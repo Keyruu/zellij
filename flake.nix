@@ -51,6 +51,21 @@
         };
       });
 
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${pkgs.system}.default ];
+          packages = [
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.rust-analyzer
+            pkgs.clippy
+            pkgs.rustfmt
+          ];
+          # curl/openssl -sys crates need pkg-config to find system libs.
+          env.OPENSSL_NO_VENDOR = 1;
+        };
+      });
+
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";

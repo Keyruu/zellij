@@ -695,6 +695,7 @@ pub(crate) fn route_action(
                     ClientTabIndexOrPaneId::ClientId(client_id),
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
@@ -748,6 +749,7 @@ pub(crate) fn route_action(
                     client_tab_index_or_paneid,
                     notification_end,
                     set_pane_blocking,
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
             wait_forever = true;
@@ -794,6 +796,7 @@ pub(crate) fn route_action(
                     client_tab_index_or_paneid,
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
+                    false, // is_scratchpad
                 )
             };
             senders.send_to_pty(pty_instr).with_context(err_context)?;
@@ -820,13 +823,13 @@ pub(crate) fn route_action(
             near_current_pane,
             no_focus,
             tab_id,
-            launch_or_focus,
+            scratchpad,
         } => {
             // Scratchpad path: defer to screen so it can find an existing
             // pane by name first and evict siblings. Spawn path stays direct.
-            if launch_or_focus {
+            if scratchpad {
                 senders
-                    .send_to_screen(ScreenInstruction::LaunchOrFocusFloatingPane {
+                    .send_to_screen(ScreenInstruction::ScratchpadFloatingPane {
                         pane_name: name,
                         command: run_command,
                         coordinates: floating_pane_coordinates,
@@ -854,6 +857,7 @@ pub(crate) fn route_action(
                         client_tab_index_or_paneid,
                         Some(NotificationEnd::new(completion_tx)),
                         false, // set_blocking
+                        false, // is_scratchpad
                     ))
                     .with_context(err_context)?;
             }
@@ -952,6 +956,7 @@ pub(crate) fn route_action(
                     client_tab_index_or_paneid,
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
@@ -981,6 +986,7 @@ pub(crate) fn route_action(
                     client_tab_index_or_paneid,
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
@@ -1038,6 +1044,7 @@ pub(crate) fn route_action(
                     client_tab_index_or_paneid,
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
