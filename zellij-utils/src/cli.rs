@@ -986,6 +986,11 @@ pub enum Sessions {
         /// Whether to pin a floating pane so that it is always on top
         #[clap(long, requires("floating"))]
         pinned: Option<bool>,
+        /// Treat this floating pane as a scratchpad: spawning it evicts other
+        /// scratchpads (leaving non-scratchpad floats like lazygit alone), and
+        /// re-invoking it while focused toggles it closed.
+        #[clap(long, requires("floating"))]
+        scratchpad: bool,
         #[clap(long, conflicts_with("floating"), conflicts_with("direction"))]
         stacked: bool,
         /// Block until the command has finished and its pane has been closed
@@ -1494,6 +1499,11 @@ pub enum CliAction {
         /// Whether to pin a floating pane so that it is always on top
         #[clap(long, requires("floating"))]
         pinned: Option<bool>,
+        /// Treat this floating pane as a scratchpad: spawning it evicts other
+        /// scratchpads (leaving non-scratchpad floats like lazygit alone), and
+        /// re-invoking it while focused toggles it closed.
+        #[clap(long, requires("floating"))]
+        scratchpad: bool,
         #[clap(long, conflicts_with("floating"), conflicts_with("direction"))]
         stacked: bool,
         /// Block until the command has finished and its pane has been closed
