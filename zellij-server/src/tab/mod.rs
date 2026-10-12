@@ -196,6 +196,15 @@ pub(crate) struct Tab {
     tiled_panes: TiledPanes,
     floating_panes: FloatingPanes,
     suppressed_panes: SuppressedPanes,
+    // Scratchpads hidden from the floating layer but kept alive so their
+    // keybind can restore the same process. Keyed by pane id.
+    parked_scratchpads: HashMap<PaneId, Box<dyn Pane>>,
+    // Regular floating panes parked while a scratchpad is shown, so the
+    // scratchpad occupies the floating layer alone. Restored when it hides.
+    parked_floats: HashMap<PaneId, Box<dyn Pane>>,
+    // Floating-layer visibility before a scratchpad overrode it, restored when
+    // the last scratchpad hides.
+    floating_show_state_before_scratchpad: Option<bool>,
     stacked_pane_list: Rc<RefCell<bool>>,
     reserved_top_rows: Rc<RefCell<HashMap<PaneId, usize>>>,
     stack_lists: HashMap<StackListId, StackList>,
@@ -972,6 +981,9 @@ impl Tab {
             tiled_panes,
             floating_panes,
             suppressed_panes: HashMap::new(),
+            parked_scratchpads: HashMap::new(),
+            parked_floats: HashMap::new(),
+            floating_show_state_before_scratchpad: None,
             stacked_pane_list,
             reserved_top_rows,
             stack_lists: HashMap::new(),
@@ -3878,6 +3890,8 @@ impl Tab {
             .map(Box::as_ref)
             .or_else(|| self.tiled_panes.get_pane(pane_id).map(Box::as_ref))
             .or_else(|| self.suppressed_panes.get(&pane_id).map(|p| p.1.as_ref()))
+            .or_else(|| self.parked_scratchpads.get(&pane_id).map(Box::as_ref))
+            .or_else(|| self.parked_floats.get(&pane_id).map(Box::as_ref))
     }
     pub fn get_pane_with_id_mut(&mut self, pane_id: PaneId) -> Option<&mut Box<dyn Pane>> {
         self.floating_panes
@@ -3888,6 +3902,8 @@ impl Tab {
                     .get_mut(&pane_id)
                     .map(|(_, pane)| pane)
             })
+            .or_else(|| self.parked_scratchpads.get_mut(&pane_id))
+            .or_else(|| self.parked_floats.get_mut(&pane_id))
     }
     pub fn get_active_pane_mut(&mut self, client_id: ClientId) -> Option<&mut Box<dyn Pane>> {
         self.get_active_pane_id(client_id).and_then(|ap| {
@@ -4284,6 +4300,8 @@ impl Tab {
                     .find(|s_p| s_p.1.pid() == PaneId::Terminal(pid))
                     .map(|s_p| &mut s_p.1)
             })
+            .or_else(|| self.parked_scratchpads.get_mut(&PaneId::Terminal(pid)))
+            .or_else(|| self.parked_floats.get_mut(&PaneId::Terminal(pid)))
         {
             // If the pane is scrolled buffer the vte events
             if terminal_output.is_scrolled() {
@@ -4307,17 +4325,7 @@ impl Tab {
         client_id: ClientId,
         bytes: VteBytes,
     ) -> Result<()> {
-        if let Some(plugin_pane) = self
-            .tiled_panes
-            .get_pane_mut(PaneId::Plugin(pid))
-            .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
-            .or_else(|| {
-                self.suppressed_panes
-                    .values_mut()
-                    .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
-            })
-        {
+        if let Some(plugin_pane) = self.get_pane_with_id_mut(PaneId::Plugin(pid)) {
             plugin_pane.handle_plugin_bytes(client_id, bytes);
         }
         Ok(())
@@ -4361,7 +4369,10 @@ impl Tab {
                     .values_mut()
                     .find(|s_p| s_p.1.pid() == PaneId::Terminal(pid))
                     .map(|s_p| &mut s_p.1)
-            }) {
+            })
+            .or_else(|| self.parked_scratchpads.get_mut(&PaneId::Terminal(pid)))
+            .or_else(|| self.parked_floats.get_mut(&PaneId::Terminal(pid)))
+        {
             terminal_output.clear_forward_pause();
             terminal_output.drain_pending_pty_input()
         } else {
@@ -4387,6 +4398,8 @@ impl Tab {
                     .find(|s_p| s_p.1.pid() == PaneId::Terminal(pid))
                     .map(|s_p| &mut s_p.1)
             })
+            .or_else(|| self.parked_scratchpads.get_mut(&PaneId::Terminal(pid)))
+            .or_else(|| self.parked_floats.get_mut(&PaneId::Terminal(pid)))
         {
             if self.pids_waiting_resize.remove(&pid) {
                 resize_pty!(
@@ -5751,6 +5764,13 @@ impl Tab {
             .map(|(_key, pane)| pane.pid())
             .collect();
         static_and_floating_pane_ids.append(&mut suppressed_pane_ids);
+        let mut parked_pane_ids: Vec<PaneId> = self
+            .parked_scratchpads
+            .keys()
+            .chain(self.parked_floats.keys())
+            .copied()
+            .collect();
+        static_and_floating_pane_ids.append(&mut parked_pane_ids);
         static_and_floating_pane_ids
     }
     pub fn get_static_and_floating_pane_ids(&self) -> Vec<PaneId> {
@@ -5845,6 +5865,29 @@ impl Tab {
         ignore_suppressed_panes: bool,
         exit_status: Option<i32>,
     ) {
+        // A parked pane is hidden but alive; closing it here means the process
+        // has actually exited (or the tab is closing), so drop it and emit the
+        // same close notifications as a visible pane.
+        if let Some(mut parked_pane) = self
+            .parked_scratchpads
+            .remove(&id)
+            .or_else(|| self.parked_floats.remove(&id))
+        {
+            if let Some(exit_status) = exit_status {
+                parked_pane.update_exit_status(exit_status);
+            }
+            let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                None,
+                None,
+                Event::PaneClosed(id.into()),
+            )]));
+            let _ = self
+                .senders
+                .send_to_screen(ScreenInstruction::NotifyPaneClosedToSubscribers {
+                    pane_id: id.into(),
+                });
+            return;
+        }
         let id_parks_a_different_pane = self.pane_parked_by(&id).is_some();
         if !ignore_suppressed_panes
             && !id_parks_a_different_pane
@@ -5877,10 +5920,16 @@ impl Tab {
                 },
             };
         }
+        let mut closed_scratchpad = false;
         let closed_pane = if self.floating_panes.panes_contain(&id) {
             if self.floating_panes.fullscreen_pane_id() == Some(id) {
                 self.floating_panes.unset_fullscreen();
             }
+            closed_scratchpad = self
+                .floating_panes
+                .get_pane(id)
+                .map(|pane| pane.is_scratchpad())
+                .unwrap_or(false);
             let closed_pane = self.floating_panes.remove_pane(id);
             self.floating_panes.move_clients_out_of_pane(id);
             if !self.floating_panes.has_selectable_panes() {
@@ -5931,6 +5980,11 @@ impl Tab {
             .send_to_screen(ScreenInstruction::NotifyPaneClosedToSubscribers {
                 pane_id: id.into(),
             });
+        if closed_scratchpad {
+            // The shown scratchpad was closed for real (not just parked), so
+            // bring back the regular floats set aside while it was shown.
+            self.restore_parked_floats();
+        }
     }
     pub fn extract_pane(
         &mut self,
@@ -7060,17 +7114,7 @@ impl Tab {
     }
 
     pub fn update_plugin_loading_stage(&mut self, pid: u32, loading_indication: LoadingIndication) {
-        if let Some(plugin_pane) = self
-            .tiled_panes
-            .get_pane_mut(PaneId::Plugin(pid))
-            .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
-            .or_else(|| {
-                self.suppressed_panes
-                    .values_mut()
-                    .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
-            })
-        {
+        if let Some(plugin_pane) = self.get_pane_with_id_mut(PaneId::Plugin(pid)) {
             plugin_pane.update_loading_indication(loading_indication);
         }
     }
@@ -7080,17 +7124,7 @@ impl Tab {
         client_id: ClientId,
         cursor_position: Option<(usize, usize)>,
     ) {
-        if let Some(plugin_pane) = self
-            .tiled_panes
-            .get_pane_mut(PaneId::Plugin(pid))
-            .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
-            .or_else(|| {
-                self.suppressed_panes
-                    .values_mut()
-                    .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
-            })
-        {
+        if let Some(plugin_pane) = self.get_pane_with_id_mut(PaneId::Plugin(pid)) {
             plugin_pane.show_cursor(client_id, cursor_position);
         }
     }
@@ -7099,32 +7133,12 @@ impl Tab {
         pid: u32,
         loading_indication: LoadingIndication,
     ) {
-        if let Some(plugin_pane) = self
-            .tiled_panes
-            .get_pane_mut(PaneId::Plugin(pid))
-            .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
-            .or_else(|| {
-                self.suppressed_panes
-                    .values_mut()
-                    .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
-            })
-        {
+        if let Some(plugin_pane) = self.get_pane_with_id_mut(PaneId::Plugin(pid)) {
             plugin_pane.start_loading_indication(loading_indication);
         }
     }
     pub fn progress_plugin_loading_offset(&mut self, pid: u32) {
-        if let Some(plugin_pane) = self
-            .tiled_panes
-            .get_pane_mut(PaneId::Plugin(pid))
-            .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
-            .or_else(|| {
-                self.suppressed_panes
-                    .values_mut()
-                    .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
-            })
-        {
+        if let Some(plugin_pane) = self.get_pane_with_id_mut(PaneId::Plugin(pid)) {
             plugin_pane.progress_animation_offset();
         }
     }
@@ -7503,6 +7517,110 @@ impl Tab {
             self.relayout_floating_panes(false)?;
         }
         Ok(())
+    }
+    /// Move a floating pane out of the floating layer while keeping its process
+    /// alive, so it can be restored later. Scratchpads and regular floats are
+    /// parked separately: a scratchpad waits for its own keybind, whereas
+    /// regular floats come back as soon as the shown scratchpad hides.
+    pub fn park_floating_pane(&mut self, pane_id: PaneId) {
+        if self.floating_panes.fullscreen_pane_id() == Some(pane_id) {
+            self.floating_panes.unset_fullscreen();
+        }
+        let Some(pane) = self.floating_panes.remove_pane(pane_id) else {
+            return;
+        };
+        self.floating_panes.move_clients_out_of_pane(pane_id);
+        if pane.is_scratchpad() {
+            self.parked_scratchpads.insert(pane_id, pane);
+        } else {
+            self.parked_floats.insert(pane_id, pane);
+        }
+        if !self.floating_panes.has_selectable_panes() {
+            self.swap_layouts.reset_floating_damage();
+            self.hide_floating_panes();
+        }
+        self.set_force_render();
+        self.floating_panes.set_force_render();
+    }
+    /// Park every pane currently in the floating layer except `except`. Used to
+    /// make a scratchpad the only floating pane on screen.
+    pub fn park_all_floating_panes_except(&mut self, except: Option<PaneId>) {
+        let pane_ids: Vec<PaneId> = self
+            .floating_panes
+            .pane_ids()
+            .copied()
+            .filter(|pane_id| Some(*pane_id) != except)
+            .collect();
+        for pane_id in pane_ids {
+            self.park_floating_pane(pane_id);
+        }
+    }
+    /// Look up a hidden scratchpad by title in the parked map.
+    pub fn find_parked_scratchpad_by_name(&self, pane_name: &str) -> Option<PaneId> {
+        self.parked_scratchpads
+            .iter()
+            .find(|(_, pane)| pane.is_scratchpad() && pane.current_title() == pane_name)
+            .map(|(pane_id, _)| *pane_id)
+    }
+    /// Remember whether the floating layer was shown before a scratchpad
+    /// overrode it, so the previous visibility can be restored later. Only the
+    /// first scratchpad shown records this; subsequent ones reuse it.
+    pub fn note_floating_show_state_for_scratchpad(&mut self) {
+        if self.floating_show_state_before_scratchpad.is_none() {
+            self.floating_show_state_before_scratchpad =
+                Some(self.floating_panes.panes_are_shown());
+        }
+    }
+    /// Bring a parked pane back into the floating layer, preserving its last
+    /// known geometry, and focus it for `client_id`.
+    pub fn restore_parked_floating_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
+        let Some(mut pane) = self
+            .parked_scratchpads
+            .remove(&pane_id)
+            .or_else(|| self.parked_floats.remove(&pane_id))
+        else {
+            return;
+        };
+        pane.set_active_at(Instant::now());
+        if pane.borderless() {
+            pane.set_content_offset(Offset::frame(0));
+        } else {
+            pane.set_content_offset(Offset::frame(1));
+            pane.render_full_viewport();
+        }
+        resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).non_fatal();
+        self.floating_panes.add_pane(pane_id, pane);
+        self.floating_panes.focus_pane(pane_id, client_id);
+    }
+    /// Restore the regular floats set aside while a scratchpad was shown and
+    /// reinstate the floating layer's previous visibility. Scratchpads stay
+    /// parked until their own keybind asks for them.
+    pub fn restore_parked_floats(&mut self) {
+        let was_shown = self
+            .floating_show_state_before_scratchpad
+            .take()
+            .unwrap_or(false);
+        let pane_ids: Vec<PaneId> = self.parked_floats.keys().copied().collect();
+        for pane_id in pane_ids {
+            let Some(mut pane) = self.parked_floats.remove(&pane_id) else {
+                continue;
+            };
+            pane.set_active_at(Instant::now());
+            if pane.borderless() {
+                pane.set_content_offset(Offset::frame(0));
+            } else {
+                pane.set_content_offset(Offset::frame(1));
+                pane.render_full_viewport();
+            }
+            resize_pty!(pane, self.os_api, self.senders, self.character_cell_size).non_fatal();
+            self.floating_panes.add_pane(pane_id, pane);
+        }
+        if was_shown && self.floating_panes.has_panes() {
+            self.show_floating_panes();
+        } else {
+            self.hide_floating_panes();
+        }
+        self.set_force_render();
     }
     pub fn add_tiled_pane(
         &mut self,

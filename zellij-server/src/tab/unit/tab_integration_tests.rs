@@ -16375,3 +16375,45 @@ fn host_focus_events_only_reach_panes_that_asked_for_them() {
         .map(|bytes| String::from_utf8_lossy(bytes).to_string());
     assert_eq!(written, Some("\u{1b}[O\u{1b}[I".to_owned()));
 }
+
+#[test]
+fn test_parked_scratchpad_stays_alive_and_restores() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let client_id = 1;
+    let mut tab = create_new_tab(size, ModeInfo::default());
+    let scratchpad_id = PaneId::Terminal(2);
+
+    tab.toggle_floating_panes(Some(client_id), None, None)
+        .unwrap();
+    tab.new_pane(
+        scratchpad_id,
+        Some("scratch".to_owned()),
+        None,
+        false,
+        true,
+        NewPanePlacement::Floating(None),
+        Some(client_id),
+        None,
+    )
+    .unwrap();
+    tab.set_pane_is_scratchpad(scratchpad_id, true);
+
+    // Parking hides the pane without closing it: it leaves the floating layer
+    // but stays alive, reachable and registered for cleanup.
+    tab.park_floating_pane(scratchpad_id);
+    assert!(!tab.get_floating_panes().any(|(id, _)| *id == scratchpad_id));
+    assert!(tab.get_pane_with_id(scratchpad_id).is_some());
+    assert!(tab.get_all_pane_ids().contains(&scratchpad_id));
+    assert_eq!(
+        tab.find_parked_scratchpad_by_name("scratch"),
+        Some(scratchpad_id)
+    );
+
+    // Restoring brings the same pane back into the floating layer.
+    tab.restore_parked_floating_pane(scratchpad_id, client_id);
+    assert!(tab.get_floating_panes().any(|(id, _)| *id == scratchpad_id));
+    assert_eq!(tab.find_parked_scratchpad_by_name("scratch"), None);
+}
