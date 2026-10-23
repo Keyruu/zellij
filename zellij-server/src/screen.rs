@@ -8692,6 +8692,39 @@ impl Screen {
         }
     }
 
+    fn reject_disconnected_navigation(&self, event: &mut ScreenInstruction) -> bool {
+        let target = match event {
+            ScreenInstruction::SwitchFocus(id, completion)
+            | ScreenInstruction::FocusNextPane(id, completion)
+            | ScreenInstruction::FocusPreviousPane(id, completion)
+            | ScreenInstruction::FocusLastPane(id, completion)
+            | ScreenInstruction::MoveFocusLeft(id, completion)
+            | ScreenInstruction::MoveFocusRight(id, completion)
+            | ScreenInstruction::MoveFocusUp(id, completion)
+            | ScreenInstruction::MoveFocusDown(id, completion)
+            | ScreenInstruction::MoveFocusLeftOrPreviousTab(id, completion)
+            | ScreenInstruction::MoveFocusRightOrNextTab(id, completion)
+            | ScreenInstruction::FocusPaneWithId(_, _, _, id, completion)
+            | ScreenInstruction::SwitchTabNext(id, completion)
+            | ScreenInstruction::SwitchTabPrev(id, completion)
+            | ScreenInstruction::ToggleTab(id, completion)
+            | ScreenInstruction::GoToTab(_, Some(id), completion)
+            | ScreenInstruction::GoToTabName(_, _, _, Some(id), completion)
+            | ScreenInstruction::GoToTabWithId(_, Some(id), completion)
+            | ScreenInstruction::FocusHostSession(id, completion)
+            | ScreenInstruction::FocusGuestSession(id, completion) => Some((*id, completion)),
+            _ => None,
+        };
+        // Startup tab placement has no completion and may precede AddClient.
+        if let Some((client_id, Some(completion))) = target {
+            if !self.connected_clients.borrow().contains_key(&client_id) {
+                completion.set_error_message(format!("Client {} is no longer attached", client_id));
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn focus_pane_with_id(
         &mut self,
         pane_id: PaneId,
@@ -11019,7 +11052,7 @@ pub(crate) fn screen_thread_main(
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
     loop {
-        let (event, mut err_ctx) = screen
+        let (mut event, mut err_ctx) = screen
             .bus
             .recv()
             .context("failed to receive event on channel")?;
@@ -11035,6 +11068,9 @@ pub(crate) fn screen_thread_main(
             screen.open_pending_session_card();
         }
 
+        if screen.reject_disconnected_navigation(&mut event) {
+            continue;
+        }
         match event {
             ScreenInstruction::PtyBytes(pid, vte_bytes) => {
                 if let Some(vte_bytes) = screen.apply_pty_bytes(pid, vte_bytes)? {
@@ -14412,6 +14448,14 @@ pub(crate) fn screen_thread_main(
                             should_be_in_place_if_hidden,
                             client_id,
                         )?;
+                        if screen.get_active_pane_id(&client_id) != Some(pane_id) {
+                            if let Some(c) = completion_tx.as_mut() {
+                                c.set_error_message(format!(
+                                    "Could not focus pane {:?} for client {}",
+                                    pane_id, client_id
+                                ));
+                            }
+                        }
                         screen.clear_bell_for_pane_id(pane_id, client_id);
                         screen.reconcile_single_pane_focus(client_id);
                         screen.sync_scroll_mode_on_focus(client_id)?;

@@ -19,6 +19,7 @@ struct ScriptedOsApi {
     replies: Arc<Mutex<VecDeque<Vec<ServerToClientMsg>>>>,
     inbox: Arc<Mutex<VecDeque<ServerToClientMsg>>>,
     sent_payloads: Arc<Mutex<Vec<Option<String>>>>,
+    sent_targets: Arc<Mutex<Vec<Option<u32>>>>,
     stdout: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -78,11 +79,13 @@ impl ClientOsApi for ScriptedOsApi {
     }
     fn send_to_server(&self, msg: ClientToServerMsg) {
         if let ClientToServerMsg::Action {
-            action: Action::CliPipe { payload, .. },
-            ..
+            action, client_id, ..
         } = msg
         {
-            self.sent_payloads.lock().unwrap().push(payload);
+            self.sent_targets.lock().unwrap().push(client_id);
+            if let Action::CliPipe { payload, .. } = action {
+                self.sent_payloads.lock().unwrap().push(payload);
+            }
             if let Some(replies) = self.replies.lock().unwrap().pop_front() {
                 self.inbox.lock().unwrap().extend(replies);
             }
@@ -154,6 +157,32 @@ fn output(text: &str) -> ServerToClientMsg {
 
 fn run(os_api: &ScriptedOsApi, action: Action) -> i32 {
     start_cli_client(Box::new(os_api.clone()), "session", vec![action])
+}
+
+#[test]
+fn explicit_client_targets_reach_action_and_pipe_messages() {
+    for (action, reply) in [
+        (Action::FocusNextPane, ServerToClientMsg::UnblockInputThread),
+        (pipe_action(Some("payload")), release(None)),
+    ] {
+        let os_api = ScriptedOsApi::new(None, vec![vec![reply]]);
+        assert_eq!(
+            crate::cli_client::start_cli_client_with_target(
+                Box::new(os_api.clone()),
+                "session",
+                vec![action],
+                Some(7)
+            ),
+            0
+        );
+        assert_eq!(*os_api.sent_targets.lock().unwrap(), vec![Some(7)]);
+    }
+}
+
+#[test]
+fn ordinary_cli_disconnect_is_an_error() {
+    let os_api = ScriptedOsApi::default();
+    assert_eq!(run(&os_api, Action::FocusNextPane), 2);
 }
 
 #[test]

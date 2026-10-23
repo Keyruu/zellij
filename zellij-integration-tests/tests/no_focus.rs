@@ -25,6 +25,7 @@ fn no_focus_new_pane_action(command: &[&str]) -> CliAction {
         width: None,
         height: None,
         pinned: None,
+        scratchpad: false,
         stacked: false,
         blocking: false,
         block_until_exit_success: false,

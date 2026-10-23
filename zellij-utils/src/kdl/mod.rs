@@ -10875,6 +10875,7 @@ fn context_menu_parses_explicit_targets_and_new_by_id_actions() {
                 ClickedPaneAction::StartRename
             )],
             vec![Action::NewFloatingPane {
+                scratchpad: false,
                 command: None,
                 pane_name: None,
                 coordinates: None,
