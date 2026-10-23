@@ -401,6 +401,7 @@ fn new_pane_cli_action(
         width: None,
         height: None,
         pinned: None,
+        scratchpad: false,
         stacked: false,
         blocking: false,
         block_until_exit_success: false,
@@ -970,7 +971,32 @@ impl TestSession {
         }
     }
 
+    pub fn run_cli_action_with_target(
+        &self,
+        cli_action: CliAction,
+        client_id: Option<zellij_utils::data::ClientId>,
+    ) -> CliResult {
+        self.spawn_cli_with_target(
+            cli_action,
+            CliCaller {
+                pane_id: None,
+                stdin: None,
+            },
+            client_id,
+        )
+        .wait_for_exit()
+    }
+
     pub fn run_cli_pipe(&self, cli_action: CliAction, caller: CliCaller) -> CliOutputHandle {
+        self.spawn_cli_with_target(cli_action, caller, None)
+    }
+
+    fn spawn_cli_with_target(
+        &self,
+        cli_action: CliAction,
+        caller: CliCaller,
+        client_id: Option<zellij_utils::data::ClientId>,
+    ) -> CliOutputHandle {
         let actions = Action::actions_from_cli(
             cli_action,
             Box::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))),
@@ -982,10 +1008,11 @@ impl TestSession {
         let thread = std::thread::Builder::new()
             .name("in_process_pipe_client".to_string())
             .spawn(move || {
-                zellij_client::cli_client::start_cli_client(
+                zellij_client::cli_client::start_cli_client_with_target(
                     Box::new(fake_client_os_api),
                     &session_name,
                     actions,
+                    client_id,
                 )
             })
             .unwrap();

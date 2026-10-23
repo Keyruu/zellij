@@ -59,6 +59,10 @@ pub struct CliArgs {
     #[clap(long, short, overrides_with = "session", value_parser = validate_session)]
     pub session: Option<String>,
 
+    /// Target an attached client from list-clients for CLI actions. Navigation otherwise requires exactly one attached client.
+    #[clap(long, global = true, value_parser = clap::value_parser!(u32).range(1..))]
+    pub client_id: Option<crate::data::ClientId>,
+
     /// Name of a predefined layout inside the layout directory or the path to a layout file
     /// if inside a session (or using the --session flag) will be added to the session as a new tab
     /// or tabs, otherwise will start a new session
@@ -2284,6 +2288,29 @@ mod tests {
         match cli.command {
             Some(Command::Subscribe(s)) => s,
             other => panic!("Expected Subscribe, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn client_target_is_global_and_requires_a_positive_id() {
+        assert_eq!(
+            try_parse(&["--client-id", "7", "action", "switch-session", "other"])
+                .unwrap()
+                .client_id,
+            Some(7)
+        );
+        assert_eq!(
+            try_parse(&["action", "focus-pane-id", "terminal_3", "--client-id", "9"])
+                .unwrap()
+                .client_id,
+            Some(9)
+        );
+        assert_eq!(
+            try_parse(&["action", "list-clients"]).unwrap().client_id,
+            None
+        );
+        for id in ["0", "-1", "invalid", "4294967296"] {
+            assert!(try_parse(&["--client-id", id, "action", "list-clients"]).is_err());
         }
     }
 

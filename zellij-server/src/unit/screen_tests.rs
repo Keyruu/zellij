@@ -315,6 +315,36 @@ fn create_new_screen_with_kitty_graphics(
     screen
 }
 
+#[test]
+fn navigation_completion_rejects_disconnected_client_without_retargeting() {
+    let screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.connected_clients.borrow_mut().insert(1, false);
+    for make_event in [
+        |id, completion| {
+            ScreenInstruction::FocusPaneWithId(PaneId::Terminal(1), true, false, id, completion)
+        },
+        |id, completion| ScreenInstruction::MoveFocusLeft(id, completion),
+        |id, completion| ScreenInstruction::GoToTab(1, Some(id), completion),
+    ] {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut event = make_event(2, Some(crate::route::NotificationEnd::new(tx)));
+        assert!(screen.reject_disconnected_navigation(&mut event));
+        drop(event);
+        assert!(rx
+            .blocking_recv()
+            .unwrap()
+            .error_message
+            .unwrap()
+            .contains("2"));
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let mut event = make_event(1, Some(crate::route::NotificationEnd::new(tx)));
+        assert!(!screen.reject_disconnected_navigation(&mut event));
+    }
+    let mut startup = ScreenInstruction::GoToTab(1, Some(2), None);
+    assert!(!screen.reject_disconnected_navigation(&mut startup));
+}
+
 type TtyStdinBytes = Arc<Mutex<BTreeMap<u32, Vec<u8>>>>;
 type ServerReceiver = Receiver<(ServerInstruction, ErrorContext)>;
 
@@ -2828,7 +2858,7 @@ pub fn send_cli_resize_action_to_screen() {
 #[test]
 pub fn send_cli_focus_next_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -2861,7 +2891,7 @@ pub fn send_cli_focus_next_pane_action() {
 #[test]
 pub fn send_cli_focus_previous_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -2894,7 +2924,7 @@ pub fn send_cli_focus_previous_pane_action() {
 #[test]
 pub fn send_cli_focus_last_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![
@@ -2943,7 +2973,7 @@ pub fn send_cli_focus_last_pane_action() {
 #[test]
 pub fn send_cli_move_focus_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -2978,7 +3008,7 @@ pub fn send_cli_move_focus_pane_action() {
 #[test]
 pub fn send_cli_move_focus_or_tab_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -4325,7 +4355,7 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
 #[test]
 pub fn send_cli_next_tab_action() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -4363,7 +4393,7 @@ pub fn send_cli_next_tab_action() {
 #[test]
 pub fn send_cli_previous_tab_action() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -4399,7 +4429,7 @@ pub fn send_cli_previous_tab_action() {
 #[test]
 pub fn send_cli_goto_tab_action() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
