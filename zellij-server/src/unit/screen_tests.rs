@@ -15533,6 +15533,7 @@ fn send_new_pane_and_collect_result(
         client_or_tab_index,
         Some(completion),
         set_blocking,
+        false, // is_scratchpad
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -15887,6 +15888,7 @@ pub fn breaking_out_panes_for_a_client_without_a_tab_does_not_stop_the_screen() 
         ClientTabIndexOrPaneId::ClientId(1),
         Some(completion),
         false,
+        false, // is_scratchpad
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -16138,6 +16140,7 @@ pub fn new_pane_when_no_tab_exists_is_closed_and_reported_as_failed() {
                     ClientTabIndexOrPaneId::ClientId(1),
                     Some(completion),
                     set_blocking,
+                    false, // is_scratchpad
                 )
             },
         );
@@ -16345,6 +16348,7 @@ fn new_pane_instruction(pid: u32, target: ClientTabIndexOrPaneId) -> ScreenInstr
         target,
         None,
         false,
+        false, // is_scratchpad
     )
 }
 
