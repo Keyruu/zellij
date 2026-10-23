@@ -1539,6 +1539,37 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    pub fn is_attached_client(&self, client_id: ClientId) -> bool {
+        self.clients.get(&client_id).is_some_and(Option::is_some)
+            && !self.pipes.values().any(|id| *id == client_id)
+    }
+
+    pub fn cli_target(&self, requested: Option<ClientId>) -> Result<ClientId, String> {
+        if let Some(client_id) = requested {
+            return if self.is_attached_client(client_id) {
+                Ok(client_id)
+            } else {
+                Err(format!(
+                    "Client {} is not attached to this session",
+                    client_id
+                ))
+            };
+        }
+        let mut attached = self
+            .clients
+            .keys()
+            .copied()
+            .filter(|id| self.is_attached_client(*id));
+        match (attached.next(), attached.next()) {
+            (Some(client_id), None) => Ok(client_id),
+            (None, _) => Err("No interactive client is attached to this session".to_owned()),
+            _ => Err(
+                "Multiple interactive clients are attached; specify --client-id from list-clients"
+                    .to_owned(),
+            ),
+        }
+    }
+
     pub fn attached_client_count(&self) -> usize {
         let pipe_ids: HashSet<ClientId> = self.pipes.values().copied().collect();
         self.clients
@@ -1841,6 +1872,45 @@ mod session_state_tests {
         let mut s = SessionState::new();
         s.clients.insert(id, None);
         s
+    }
+
+    #[test]
+    fn cli_target_uses_cold_attached_clients_not_cli_connections_or_watchers() {
+        let mut s = SessionState::new();
+        let cli = s.new_client();
+        let watcher = s.new_client();
+        s.convert_client_to_watcher(watcher, false);
+        let pipe = s.new_client();
+        s.set_client_data(pipe, Size::default(), false);
+        s.associate_pipe_with_client("pipe".to_owned(), pipe);
+        assert!(s.cli_target(None).is_err());
+        for id in [cli, watcher, pipe, 0, 999] {
+            assert!(s.cli_target(Some(id)).is_err());
+        }
+        let attached = s.new_client();
+        s.set_client_data(attached, Size::default(), false);
+        assert_eq!(s.cli_target(None), Ok(attached));
+        s.set_last_active_client(cli);
+        assert_eq!(s.cli_target(None), Ok(attached));
+    }
+
+    #[test]
+    fn cli_target_is_explicit_or_unique_and_never_falls_back_from_stale_ids() {
+        let mut s = SessionState::new();
+        let first = s.new_client();
+        let second = s.new_client();
+        for id in [first, second] {
+            s.set_client_data(id, Size::default(), false);
+        }
+        s.set_last_active_client(second);
+        assert!(s.cli_target(None).is_err());
+        assert_eq!(s.cli_target(Some(first)), Ok(first));
+        s.remove_client(first);
+        assert!(s.cli_target(Some(first)).is_err());
+        assert_eq!(s.cli_target(None), Ok(second));
+        s.convert_client_to_watcher(second, false);
+        assert!(s.cli_target(None).is_err());
+        assert!(s.cli_target(Some(second)).is_err());
     }
 
     #[test]
@@ -3811,6 +3881,10 @@ pub fn start_server_impl(
         }
         let (instruction, mut err_ctx) = server_receiver.recv().unwrap();
         err_ctx.add_call(ContextType::IPCServer((&instruction).into()));
+        let close_current = matches!(
+            &instruction,
+            ServerInstruction::SwitchSessionAndCloseCurrent(..)
+        );
         match instruction {
             ServerInstruction::FirstClientConnected(cli_assets, is_web_client, client_id) => {
                 let is_resumed_session = match &cli_assets.layout {
@@ -4598,36 +4672,6 @@ pub fn start_server_impl(
                         .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             },
-            ServerInstruction::SwitchSessionAndCloseCurrent(
-                connect_to_session,
-                client_id,
-                completion_tx,
-            ) => {
-                let switching_away = connect_to_session.name.is_some()
-                    && connect_to_session.name.as_deref() != Some(own_session_name.as_str());
-                let command_was_run = session_data
-                    .read()
-                    .unwrap()
-                    .as_ref()
-                    .map(|s| {
-                        s.terminal_command_submitted
-                            .load(std::sync::atomic::Ordering::SeqCst)
-                    })
-                    .unwrap_or(true);
-                let other_clients_attached = session_state
-                    .read()
-                    .unwrap()
-                    .other_clients_are_attached(client_id);
-                let _ = to_server.send(ServerInstruction::SwitchSession(
-                    connect_to_session,
-                    client_id,
-                    completion_tx,
-                ));
-                if switching_away && !command_was_run && !other_clients_attached {
-                    delete_session_on_exit = true;
-                    let _ = to_server.send(ServerInstruction::KillSession);
-                }
-            },
             ServerInstruction::HistoryMove(history_move, client_id, completion_tx) => {
                 let live_sessions = session_data
                     .read()
@@ -4662,10 +4706,35 @@ pub fn start_server_impl(
                     },
                 }
             },
-            ServerInstruction::SwitchSession(mut connect_to_session, client_id, completion_tx) => {
+            ServerInstruction::SwitchSession(
+                mut connect_to_session,
+                client_id,
+                mut completion_tx,
+            )
+            | ServerInstruction::SwitchSessionAndCloseCurrent(
+                mut connect_to_session,
+                client_id,
+                mut completion_tx,
+            ) => {
+                if let Err(error) = session_state.read().unwrap().cli_target(Some(client_id)) {
+                    if let Some(completion) = completion_tx.as_mut() {
+                        completion.set_error_message(error);
+                    }
+                    continue;
+                }
                 if connect_to_session.name.as_deref() == Some(own_session_name.as_str()) {
                     log::error!("Cannot attach to same session");
                 } else {
+                    let should_close_current = close_current
+                        && connect_to_session.name.is_some()
+                        && !session_state
+                            .read()
+                            .unwrap()
+                            .other_clients_are_attached(client_id)
+                        && session_data.read().unwrap().as_ref().is_some_and(|s| {
+                            !s.terminal_command_submitted
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                        });
                     attach_switch_context(
                         &mut connect_to_session,
                         &mut client_histories,
@@ -4686,13 +4755,22 @@ pub fn start_server_impl(
                         connect_to_session.apply_layout_dir(&layout_dir);
                     }
 
-                    send_to_client!(
+                    let switch_result = os_input.send_to_client(
                         client_id,
-                        os_input,
                         ServerToClientMsg::SwitchSession { connect_to_session },
-                        session_state,
-                        session_data
                     );
+                    if let Err(error) = &switch_result {
+                        if let Some(completion) = completion_tx.as_mut() {
+                            completion.set_error_message(format!(
+                                "Failed to switch client {}: {}",
+                                client_id, error
+                            ));
+                        }
+                    }
+                    if should_close_current && switch_result.is_ok() {
+                        delete_session_on_exit = true;
+                        let _ = to_server.send(ServerInstruction::KillSession);
+                    }
                     remove_client!(client_id, os_input, session_state, session_data);
                     drop(completion_tx); // do not deadlock with route thread
 

@@ -3421,6 +3421,7 @@ fn test_client_messages() {
     });
     test_client_roundtrip!(ClientToServerMsg::Action {
         action: Action::NewFloatingPane {
+            scratchpad: false,
             command: None,
             pane_name: None,
             coordinates: Some(FloatingPaneCoordinates {

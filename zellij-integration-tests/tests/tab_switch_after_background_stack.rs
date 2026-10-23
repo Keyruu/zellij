@@ -26,6 +26,7 @@ fn new_pane_action(stacked: bool, no_focus: bool, tab_id: Option<usize>) -> CliA
         width: None,
         height: None,
         pinned: None,
+        scratchpad: false,
         stacked,
         blocking: false,
         block_until_exit_success: false,

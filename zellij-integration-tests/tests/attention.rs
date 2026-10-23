@@ -834,6 +834,7 @@ fn new_command_pane_with_notify(command: &[&str]) -> CliAction {
         width: None,
         height: None,
         pinned: None,
+        scratchpad: false,
         stacked: false,
         blocking: false,
         block_until_exit_success: false,
