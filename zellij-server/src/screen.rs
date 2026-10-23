@@ -56,7 +56,7 @@ use zellij_utils::data::{
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::actions::Action;
-use zellij_utils::input::command::RunCommand;
+use zellij_utils::input::command::{RunCommand, RunCommandAction};
 use zellij_utils::input::config::Config;
 use zellij_utils::input::context_menu::ContextMenuConfig;
 use zellij_utils::input::keybinds::{shortcut_for_action, Keybinds};
@@ -380,6 +380,7 @@ pub enum ScreenInstruction {
         ClientTabIndexOrPaneId,
         Option<NotificationEnd>, // completion signal
         bool,                    // set_blocking
+        bool, // is_scratchpad — mark the pane as a scratchpad on creation
     ),
     OpenInPlaceEditor(PaneId, ClientTabIndexOrPaneId),
     TogglePaneEmbedOrFloating(ClientId, Option<NotificationEnd>),
@@ -398,6 +399,17 @@ pub enum ScreenInstruction {
         client_id: ClientId,
         tab_id: Option<usize>,
         completion: Option<NotificationEnd>,
+    },
+    /// Scratchpad semantics for floating panes: focus an existing scratchpad
+    /// by pane_name (evicting sibling scratchpads), toggle it closed if it's
+    /// already focused, or spawn a fresh one (also after evicting siblings).
+    /// Falls back to a plain spawn if no pane_name was provided.
+    ScratchpadFloatingPane {
+        pane_name: Option<String>,
+        command: Option<RunCommandAction>,
+        coordinates: Option<FloatingPaneCoordinates>,
+        client_id: ClientId,
+        completion_tx: Option<NotificationEnd>,
     },
     WriteCharacter(
         Option<KeyWithModifier>,
@@ -1191,6 +1203,9 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::HideFloatingPanes { .. } => ScreenContext::HideFloatingPanes,
             ScreenInstruction::AreFloatingPanesVisible { .. } => {
                 ScreenContext::AreFloatingPanesVisible
+            },
+            ScreenInstruction::ScratchpadFloatingPane { .. } => {
+                ScreenContext::ScratchpadFloatingPane
             },
             ScreenInstruction::WriteCharacter(..) => ScreenContext::WriteCharacter,
             ScreenInstruction::KeyToPopup(..) => ScreenContext::KeyToPopup,
@@ -6258,6 +6273,133 @@ impl Screen {
         Ok(())
     }
 
+    /// Scratchpad semantics: a scratchpad is shown alone in the floating layer
+    /// and toggles between shown and hidden (parked alive) on its own keybind.
+    /// Switching scratchpads hides the previous one but keeps it alive, so its
+    /// process is reused instead of respawned. Scoped to the focused tab —
+    /// cross-tab scratchpads are out of scope.
+    pub fn scratchpad_floating_pane(
+        &mut self,
+        pane_name: Option<String>,
+        command: Option<RunCommandAction>,
+        coordinates: Option<FloatingPaneCoordinates>,
+        client_id: ClientId,
+        completion_tx: &mut Option<NotificationEnd>,
+    ) -> Result<()> {
+        let tab_index = match self.active_tab_ids.get(&client_id).copied() {
+            Some(idx) => idx,
+            None => {
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_exit_status(1);
+                    c.set_error_message("No active tab for client".to_string());
+                }
+                return Ok(());
+            },
+        };
+        // The requested scratchpad may be currently shown (in the floating
+        // layer) or parked (hidden but alive). Reuse either rather than
+        // spawning a second process.
+        let visible = pane_name
+            .as_deref()
+            .and_then(|name| self.find_floating_pane_by_name(tab_index, name));
+        let parked = pane_name.as_deref().and_then(|name| {
+            self.tabs
+                .get(&tab_index)
+                .and_then(|tab| tab.find_parked_scratchpad_by_name(name))
+        });
+        // Toggle-off only when the requested scratchpad is the one currently
+        // shown and focused. Otherwise we show/bring-forward it.
+        let toggle_off = visible
+            .zip(self.tabs.get(&tab_index))
+            .map(|(pane_id, tab)| {
+                tab.are_floating_panes_visible()
+                    && tab
+                        .get_active_pane(client_id)
+                        .map(|pane| pane.pid() == pane_id)
+                        .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if toggle_off {
+            // Hide the scratchpad (keep its process alive) and bring back the
+            // regular floats that were set aside while it was shown.
+            if let Some(tab) = self.tabs.get_mut(&tab_index) {
+                if let Some(pane_id) = visible {
+                    tab.park_floating_pane(pane_id);
+                }
+                tab.restore_parked_floats();
+            }
+            return Ok(());
+        }
+
+        let mut spawn_new = false;
+        if let Some(tab) = self.tabs.get_mut(&tab_index) {
+            // A shown scratchpad is alone in the floating layer: park every
+            // other floating pane (scratchpads and regular floats alike) while
+            // keeping it alive. Remember the layer visibility for later.
+            tab.note_floating_show_state_for_scratchpad();
+            tab.park_all_floating_panes_except(visible);
+            if let Some(pane_id) = visible {
+                tab.show_floating_panes();
+                tab.focus_pane_with_id(pane_id, true, false, client_id)?;
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_pane_id(pane_id);
+                }
+            } else if let Some(pane_id) = parked {
+                tab.show_floating_panes();
+                tab.restore_parked_floating_pane(pane_id, client_id);
+                if let Some(c) = completion_tx.as_mut() {
+                    c.set_affected_pane_id(pane_id);
+                }
+            } else {
+                tab.show_floating_panes();
+                spawn_new = true;
+            }
+        } else {
+            if let Some(c) = completion_tx.as_mut() {
+                c.set_exit_status(1);
+                c.set_error_message("No active tab for client".to_string());
+            }
+            return Ok(());
+        }
+
+        if spawn_new {
+            // Pass None when no command was supplied — PTY fills the shell from
+            // its own defaults (which carry the correct cwd /
+            // use_terminal_title), rather than synthesizing one here.
+            let run_cmd = command.map(|c| TerminalAction::RunCommand(c.into()));
+            self.bus
+                .senders
+                .send_to_pty(PtyInstruction::SpawnTerminal(
+                    run_cmd,
+                    pane_name,
+                    NewPanePlacement::Floating(coordinates),
+                    false,
+                    ClientTabIndexOrPaneId::TabIndex(tab_index),
+                    completion_tx.take(),
+                    false, // set_blocking
+                    None,  // no origin pane for screen-initiated scratchpad spawn
+                    true,  // is_scratchpad — this is the scratchpad spawn path
+                ))
+                .with_context(|| format!("failed to spawn scratchpad floating pane"))?;
+        }
+        Ok(())
+    }
+
+    fn find_floating_pane_by_name(
+        &self,
+        tab_index: usize,
+        pane_name: &str,
+    ) -> Option<PaneId> {
+        let tab = self.tabs.get(&tab_index)?;
+        for (pane_id, pane) in tab.get_floating_panes() {
+            if pane.current_title() == pane_name {
+                return Some(*pane_id);
+            }
+        }
+        None
+    }
+
     /// Creates a new [`Tab`] in this [`Screen`]
     pub fn new_tab(
         &mut self,
@@ -10758,6 +10900,7 @@ pub(crate) fn screen_thread_main(
                 client_or_tab_index,
                 mut completion_tx,
                 set_blocking,
+                is_scratchpad,
             ) => {
                 completion_tx.as_mut().map(|c| c.set_affected_pane_id(pid));
                 let attention_command = match (&invoked_with, &hold_for_command, pid) {
@@ -10773,6 +10916,15 @@ pub(crate) fn screen_thread_main(
                     (completion_tx, None)
                 } else {
                     (None, completion_tx)
+                };
+
+                // Resolve the target tab up front so we can mark the pane as a
+                // scratchpad after the new_pane call below — the helper
+                // requires the flag to be on the Pane, not the layout.
+                let target_tab_index = match client_or_tab_index {
+                    ClientTabIndexOrPaneId::TabIndex(ti)
+                    | ClientTabIndexOrPaneId::TabIndexNoFocus(ti) => Some(ti),
+                    _ => None,
                 };
 
                 match client_or_tab_index {
@@ -10950,6 +11102,24 @@ pub(crate) fn screen_thread_main(
                         screen.arm_pane_watch(zellij_utils::data::PaneId::Terminal(terminal_id));
                     }
                 }
+                // Mark the pane as a scratchpad if requested. For ClientId
+                // routing the active tab may have shifted under us, so fall
+                // back to whichever tab contains the pane.
+                if is_scratchpad {
+                    let tab_to_mark = target_tab_index
+                        .or_else(|| {
+                            screen
+                                .tabs
+                                .iter()
+                                .find(|(_, tab)| tab.has_pane_with_pid(&pid))
+                                .map(|(idx, _)| *idx)
+                        });
+                    if let Some(tab_index) = tab_to_mark {
+                        if let Some(tab) = screen.tabs.get_mut(&tab_index) {
+                            tab.set_pane_is_scratchpad(pid, true);
+                        }
+                    }
+                }
                 screen.log_and_report_session_state()?;
 
                 screen.render(None)?;
@@ -11089,6 +11259,22 @@ pub(crate) fn screen_thread_main(
                             completion,
                         ));
                 }
+            },
+            ScreenInstruction::ScratchpadFloatingPane {
+                pane_name,
+                command,
+                coordinates,
+                client_id,
+                completion_tx,
+            } => {
+                let mut completion_tx = completion_tx;
+                screen.scratchpad_floating_pane(
+                    pane_name,
+                    command,
+                    coordinates,
+                    client_id,
+                    &mut completion_tx,
+                )?;
             },
             ScreenInstruction::WriteCharacter(
                 key_with_modifier,

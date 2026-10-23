@@ -419,6 +419,7 @@ impl TryFrom<ProtobufAction> for Action {
                             near_current_pane,
                             no_focus: false,
                             tab_id: None,
+                            scratchpad: false,
                         })
                     } else {
                         Ok(Action::NewFloatingPane {
@@ -428,6 +429,7 @@ impl TryFrom<ProtobufAction> for Action {
                             near_current_pane,
                             no_focus: false,
                             tab_id: None,
+                            scratchpad: false,
                         })
                     }
                 },

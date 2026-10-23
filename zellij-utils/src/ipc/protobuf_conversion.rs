@@ -1799,6 +1799,7 @@ impl From<crate::input::actions::Action>
                 near_current_pane,
                 no_focus,
                 tab_id,
+                scratchpad,
                 ..
             } => ActionType::NewFloatingPane(NewFloatingPaneAction {
                 command: command.map(|c| c.into()),
@@ -1807,6 +1808,7 @@ impl From<crate::input::actions::Action>
                 near_current_pane,
                 tab_id: tab_id.map(|t| t as u32),
                 no_focus,
+                scratchpad,
             }),
             crate::input::actions::Action::NewTiledPane {
                 direction,
@@ -2851,6 +2853,7 @@ impl TryFrom<crate::client_server_contract::client_server_contract::Action>
                     near_current_pane: new_floating_action.near_current_pane,
                     no_focus: new_floating_action.no_focus,
                     tab_id: new_floating_action.tab_id.map(|t| t as usize),
+                    scratchpad: new_floating_action.scratchpad,
                 })
             },
             ActionType::NewTiledPane(new_tiled_action) => {

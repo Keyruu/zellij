@@ -851,6 +851,7 @@ fn route_action_with_origin(
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
                     None,
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
@@ -905,6 +906,7 @@ fn route_action_with_origin(
                     notification_end,
                     set_pane_blocking,
                     None,
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
             wait_forever = true;
@@ -958,6 +960,7 @@ fn route_action_with_origin(
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
                     None,
+                    false, // is_scratchpad
                 )
             };
             senders.send_to_pty(pty_instr).with_context(err_context)?;
@@ -984,24 +987,43 @@ fn route_action_with_origin(
             near_current_pane,
             no_focus,
             tab_id,
+            scratchpad,
         } => {
-            let run_cmd = run_command
-                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
-                .or_else(|| default_shell.clone());
-            let client_tab_index_or_paneid =
-                new_pane_routing(no_focus, near_current_pane, tab_id, pane_id, client_id);
-            senders
-                .send_to_pty(PtyInstruction::SpawnTerminal(
-                    run_cmd,
-                    name,
-                    NewPanePlacement::Floating(floating_pane_coordinates),
-                    false,
-                    client_tab_index_or_paneid,
-                    Some(NotificationEnd::new(completion_tx)),
-                    false, // set_blocking
-                    origin_pane_id,
-                ))
-                .with_context(err_context)?;
+            if scratchpad {
+                senders
+                    .send_to_screen(ScreenInstruction::ScratchpadFloatingPane {
+                        pane_name: name,
+                        command: run_command,
+                        coordinates: floating_pane_coordinates,
+                        client_id,
+                        completion_tx: Some(NotificationEnd::new(completion_tx)),
+                    })
+                    .with_context(err_context)?;
+            } else {
+                let run_cmd = run_command
+                    .map(|cmd| TerminalAction::RunCommand(cmd.into()))
+                    .or_else(|| default_shell.clone());
+                let client_tab_index_or_paneid = new_pane_routing(
+                    no_focus,
+                    near_current_pane,
+                    tab_id,
+                    pane_id,
+                    client_id,
+                );
+                senders
+                    .send_to_pty(PtyInstruction::SpawnTerminal(
+                        run_cmd,
+                        name,
+                        NewPanePlacement::Floating(floating_pane_coordinates),
+                        false,
+                        client_tab_index_or_paneid,
+                        Some(NotificationEnd::new(completion_tx)),
+                        false, // set_blocking
+                        origin_pane_id,
+                        false, // is_scratchpad
+                    ))
+                    .with_context(err_context)?;
+            }
         },
         Action::NewInPlacePane {
             command: run_command,
@@ -1102,6 +1124,7 @@ fn route_action_with_origin(
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
                     origin_pane_id,
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
@@ -1134,6 +1157,7 @@ fn route_action_with_origin(
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
                     origin_pane_id,
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },
@@ -1193,6 +1217,7 @@ fn route_action_with_origin(
                     Some(NotificationEnd::new(completion_tx)),
                     false, // set_blocking
                     None,
+                    false, // is_scratchpad
                 ))
                 .with_context(err_context)?;
         },

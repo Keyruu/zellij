@@ -3639,6 +3639,7 @@ pub fn send_cli_new_pane_action_with_default_parameters() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: None,
         command: vec![],
         plugin: None,
@@ -3752,6 +3753,7 @@ pub fn send_cli_new_pane_action_with_split_direction() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: Some(Direction::Right),
         command: vec![],
         plugin: None,
@@ -3810,6 +3812,7 @@ pub fn send_cli_new_pane_action_with_command_and_cwd() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: Some(Direction::Right),
         command: vec!["htop".into()],
         plugin: None,
@@ -3879,6 +3882,7 @@ pub fn send_cli_new_pane_action_with_floating_pane_and_coordinates() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: Some(Direction::Right),
         command: vec!["htop".into()],
         plugin: None,
@@ -5822,6 +5826,7 @@ pub fn send_cli_new_pane_in_place_with_close_replaced_pane() {
         pty_receiver
     );
     let cli_action = CliAction::NewPane {
+        scratchpad: false,
         direction: None,
         command: vec!["bash".into()],
         plugin: None,
@@ -8689,6 +8694,7 @@ pub fn send_cli_new_pane_action_with_tab_id() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: Some(Direction::Right),
         command: vec![],
         plugin: None,
@@ -8754,6 +8760,7 @@ pub fn send_cli_new_floating_pane_action_with_tab_id() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: None,
         command: vec![],
         plugin: None,
@@ -8869,6 +8876,7 @@ pub fn send_cli_new_pane_action_with_tab_id_and_direction() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: Some(Direction::Right),
         command: vec![],
         plugin: None,
@@ -8933,6 +8941,7 @@ pub fn send_cli_new_pane_action_with_tab_id_and_stacked() {
         pty_receiver
     );
     let cli_new_pane_action = CliAction::NewPane {
+        scratchpad: false,
         direction: None,
         command: vec!["ls".into()],
         plugin: None,
@@ -9123,6 +9132,7 @@ pub fn pty_bytes_and_hold_pane_buffered_before_new_pane() {
         ClientTabIndexOrPaneId::ClientId(client_id),
         None,  // completion_tx
         false, // set_blocking
+        false, // is_scratchpad
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -15458,6 +15468,7 @@ fn send_new_pane_and_collect_result(
         client_or_tab_index,
         Some(completion),
         set_blocking,
+        false, // is_scratchpad
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -15812,6 +15823,7 @@ pub fn breaking_out_panes_for_a_client_without_a_tab_does_not_stop_the_screen() 
         ClientTabIndexOrPaneId::ClientId(1),
         Some(completion),
         false,
+        false, // is_scratchpad
     ));
     std::thread::sleep(std::time::Duration::from_millis(100));
     mock_screen.teardown(vec![pty_thread, screen_thread]);
@@ -16063,6 +16075,7 @@ pub fn new_pane_when_no_tab_exists_is_closed_and_reported_as_failed() {
                     ClientTabIndexOrPaneId::ClientId(1),
                     Some(completion),
                     set_blocking,
+                    false, // is_scratchpad
                 )
             },
         );
@@ -16270,6 +16283,7 @@ fn new_pane_instruction(pid: u32, target: ClientTabIndexOrPaneId) -> ScreenInstr
         target,
         None,
         false,
+        false, // is_scratchpad
     )
 }
 

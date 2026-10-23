@@ -224,6 +224,7 @@ pub enum ScreenContext {
     ShowFloatingPanes,
     HideFloatingPanes,
     AreFloatingPanesVisible,
+    ScratchpadFloatingPane,
     TogglePaneEmbedOrFloating,
     HorizontalSplit,
     VerticalSplit,
