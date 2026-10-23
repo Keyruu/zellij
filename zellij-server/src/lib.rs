@@ -4000,9 +4000,12 @@ pub fn start_server_impl(
                     .as_ref()
                     .unwrap()
                     .senders
-                    .send_to_screen(ScreenInstruction::RecomputeTabSize(
+                    .send_to_screen(ScreenInstruction::AddClient(
                         client_id,
+                        is_web_client,
                         client_attributes.size,
+                        None,
+                        None,
                     ))
                     .unwrap();
 
