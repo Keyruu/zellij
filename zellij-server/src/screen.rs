@@ -2054,7 +2054,7 @@ pub(crate) struct Screen {
     terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
     connected_clients: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     client_display_slots: Rc<RefCell<HashMap<ClientId, usize>>>,
-    highest_client_id_seen: ClientId,
+    pending_clients: HashMap<ClientId, bool>, // registered before the first tab exists
     /// The indices of this [`Screen`]'s active [`Tab`]s.
     active_tab_ids: BTreeMap<ClientId, usize>,
     client_sizes: HashMap<ClientId, Size>,
@@ -2426,7 +2426,7 @@ impl Screen {
             style: client_attributes.style,
             connected_clients: Rc::new(RefCell::new(HashMap::new())),
             client_display_slots: Rc::new(RefCell::new(HashMap::new())),
-            highest_client_id_seen: 0,
+            pending_clients: HashMap::new(),
             active_tab_ids: BTreeMap::new(),
             client_sizes: HashMap::new(),
             global_last_active_tab_id: 0,
@@ -6541,14 +6541,9 @@ impl Screen {
     ) -> Result<()> {
         let err_context = || format!("failed to create new tab for client {client_id:?}",);
 
-        let client_id = client_id.map(|client_id| {
-            if self.get_active_tab(client_id).is_ok() {
-                client_id
-            } else if let Some(first_client_id) = self.get_first_client_id() {
-                first_client_id
-            } else {
-                client_id
-            }
+        let client_id = client_id.filter(|client_id| {
+            self.connected_clients.borrow().contains_key(client_id)
+                || self.pending_clients.contains_key(client_id)
         });
 
         let tab_name = tab_name.unwrap_or_else(|| String::new());
@@ -6670,24 +6665,10 @@ impl Screen {
             }
             return Ok(());
         }
-        let (client_id, mut is_web_client) = client_id_and_is_web_client;
-        let client_id = if self.get_active_tab(client_id).is_ok() {
-            if let Some(connected_client_is_web_client) =
-                self.connected_clients.borrow().get(&client_id)
-            {
-                is_web_client = *connected_client_is_web_client;
-            }
-            client_id
-        } else if let Some(first_client_id) = self.get_first_client_id() {
-            if let Some(first_client_is_web_client) =
-                self.connected_clients.borrow().get(&first_client_id)
-            {
-                is_web_client = *first_client_is_web_client;
-            }
-            first_client_id
-        } else {
-            client_id
-        };
+        let (client_id, _) = client_id_and_is_web_client;
+        let client_is_live = self.connected_clients.borrow().contains_key(&client_id)
+            || self.pending_clients.contains_key(&client_id);
+        let should_change_client_focus = should_change_client_focus && client_is_live;
         let err_context = || format!("failed to apply layout for tab {tab_id:?}",);
 
         let passthrough_affected_client_ids: Vec<ClientId> = if should_change_client_focus {
@@ -6761,13 +6742,6 @@ impl Screen {
             None
         };
 
-        if !self.active_tab_ids.contains_key(&client_id) {
-            self.connected_clients
-                .borrow_mut()
-                .insert(client_id, is_web_client);
-        }
-
-        // apply the layout to the new tab
         self.tabs
             .get_mut(&tab_id)
             .context("couldn't find tab with index {tab_id}")
@@ -6785,6 +6759,9 @@ impl Screen {
                     tab.visible(true)?;
                     tab.add_multiple_clients(drained_clients)?;
                 }
+                if !client_is_live {
+                    tab.remove_client(client_id);
+                }
                 tab.update_input_modes()?;
                 let tab_size = tab.size;
                 tab.resize_whole_tab(tab_size).with_context(err_context)?;
@@ -6793,9 +6770,13 @@ impl Screen {
             })
             .with_context(err_context)?;
 
-        let client_has_since_disconnected = client_id <= self.highest_client_id_seen;
-        if !self.active_tab_ids.contains_key(&client_id) && !client_has_since_disconnected {
-            self.add_client(client_id, is_web_client)
+        let pending_clients: Vec<_> = self
+            .pending_clients
+            .iter()
+            .map(|(id, is_web_client)| (*id, *is_web_client))
+            .collect();
+        for (pending_client_id, is_web_client) in pending_clients {
+            self.add_client(pending_client_id, is_web_client)
                 .with_context(err_context)?;
         }
 
@@ -6818,6 +6799,11 @@ impl Screen {
     }
 
     pub fn add_client(&mut self, client_id: ClientId, is_web_client: bool) -> Result<()> {
+        if self.tabs.is_empty() {
+            // Initial layout creation is asynchronous; registration must precede its completion.
+            self.pending_clients.insert(client_id, is_web_client);
+            return Ok(());
+        }
         let err_context = |tab_index| {
             format!("failed to attach client {client_id} to tab with index {tab_index}")
         };
@@ -6852,10 +6838,20 @@ impl Screen {
             first_tab_index.filter(|_| attach_to_first_tab_on_tiled_surface)
         {
             first_tab_index
-        } else if let Some((_first_client, first_active_tab_index)) =
-            self.active_tab_ids.iter().next()
+        } else if let Some((_first_client, first_active_tab_index)) = self
+            .active_tab_ids
+            .iter()
+            .find(|(_, tab_id)| self.tabs.get(tab_id).is_some_and(|tab| !tab.is_pending()))
         {
             *first_active_tab_index
+        } else if self
+            .tabs
+            .get(&self.global_last_active_tab_id)
+            .is_some_and(|tab| !tab.is_pending())
+        {
+            self.global_last_active_tab_id
+        } else if let Some((tab_id, _)) = self.tabs.iter().find(|(_, tab)| !tab.is_pending()) {
+            *tab_id
         } else if self.tabs.contains_key(&self.global_last_active_tab_id) {
             self.global_last_active_tab_id
         } else if self.tabs.contains_key(&0) {
@@ -6866,7 +6862,7 @@ impl Screen {
             bail!("Can't find a valid tab to attach client to!");
         };
 
-        self.highest_client_id_seen = self.highest_client_id_seen.max(client_id);
+        self.pending_clients.remove(&client_id);
         self.active_tab_ids.insert(client_id, tab_index);
         self.release_kitty_host_state(client_id);
         self.connected_clients
@@ -6928,7 +6924,7 @@ impl Screen {
 
     pub fn remove_client(&mut self, client_id: ClientId) -> Result<()> {
         let err_context = || format!("failed to remove client {client_id}");
-        self.highest_client_id_seen = self.highest_client_id_seen.max(client_id);
+        self.pending_clients.remove(&client_id);
 
         self.set_client_dimmed(client_id, false, None);
         self.close_popup_for_client(client_id);
@@ -8690,6 +8686,39 @@ impl Screen {
             },
             None => Ok(false),
         }
+    }
+
+    fn reject_disconnected_navigation(&self, event: &mut ScreenInstruction) -> bool {
+        let target = match event {
+            ScreenInstruction::SwitchFocus(id, completion)
+            | ScreenInstruction::FocusNextPane(id, completion)
+            | ScreenInstruction::FocusPreviousPane(id, completion)
+            | ScreenInstruction::FocusLastPane(id, completion)
+            | ScreenInstruction::MoveFocusLeft(id, completion)
+            | ScreenInstruction::MoveFocusRight(id, completion)
+            | ScreenInstruction::MoveFocusUp(id, completion)
+            | ScreenInstruction::MoveFocusDown(id, completion)
+            | ScreenInstruction::MoveFocusLeftOrPreviousTab(id, completion)
+            | ScreenInstruction::MoveFocusRightOrNextTab(id, completion)
+            | ScreenInstruction::FocusPaneWithId(_, _, _, id, completion)
+            | ScreenInstruction::SwitchTabNext(id, completion)
+            | ScreenInstruction::SwitchTabPrev(id, completion)
+            | ScreenInstruction::ToggleTab(id, completion)
+            | ScreenInstruction::GoToTab(_, Some(id), completion)
+            | ScreenInstruction::GoToTabName(_, _, _, Some(id), completion)
+            | ScreenInstruction::GoToTabWithId(_, Some(id), completion)
+            | ScreenInstruction::FocusHostSession(id, completion)
+            | ScreenInstruction::FocusGuestSession(id, completion) => Some((*id, completion)),
+            _ => None,
+        };
+        // Startup tab placement has no completion and may precede AddClient.
+        if let Some((client_id, Some(completion))) = target {
+            if !self.connected_clients.borrow().contains_key(&client_id) {
+                completion.set_error_message(format!("Client {} is no longer attached", client_id));
+                return true;
+            }
+        }
+        false
     }
 
     pub fn focus_pane_with_id(
@@ -11019,7 +11048,7 @@ pub(crate) fn screen_thread_main(
     let mut plugin_loading_message_cache = HashMap::new();
     let mut keybind_intercepts = HashMap::new();
     loop {
-        let (event, mut err_ctx) = screen
+        let (mut event, mut err_ctx) = screen
             .bus
             .recv()
             .context("failed to receive event on channel")?;
@@ -11035,6 +11064,9 @@ pub(crate) fn screen_thread_main(
             screen.open_pending_session_card();
         }
 
+        if screen.reject_disconnected_navigation(&mut event) {
+            continue;
+        }
         match event {
             ScreenInstruction::PtyBytes(pid, vte_bytes) => {
                 if let Some(vte_bytes) = screen.apply_pty_bytes(pid, vte_bytes)? {
@@ -12905,9 +12937,13 @@ pub(crate) fn screen_thread_main(
                     completion_tx.set_affected_pane_id(affected_pane_id);
                 }
                 pending_tab_ids.remove(&tab_id);
+                let should_change_focus_to_new_tab = should_change_focus_to_new_tab
+                    && screen.active_tab_ids.contains_key(&client_id);
                 if pending_tab_ids.is_empty() {
                     for (tab_index, client_id) in pending_tab_switches.drain() {
-                        screen.go_to_tab(tab_index as usize + 1, client_id)?;
+                        if screen.active_tab_ids.contains_key(&client_id) {
+                            screen.go_to_tab(tab_index as usize + 1, client_id)?;
+                        }
                     }
                     if should_change_focus_to_new_tab {
                         // Convert ID → position for go_to_tab (which expects 1-based position)
@@ -12916,16 +12952,8 @@ pub(crate) fn screen_thread_main(
                         }
                     }
                 } else if should_change_focus_to_new_tab {
-                    let client_id_to_switch = if screen.active_tab_ids.contains_key(&client_id) {
-                        Some(client_id)
-                    } else {
-                        screen.active_tab_ids.keys().next().copied()
-                    };
-                    if let Some(client_id_to_switch) = client_id_to_switch {
-                        // Convert ID → position for pending_tab_switches (which stores positions)
-                        if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
-                            pending_tab_switches.insert((tab_position, client_id_to_switch));
-                        }
+                    if let Some(tab_position) = screen.get_tab_position_by_id(tab_id) {
+                        pending_tab_switches.insert((tab_position, client_id));
                     }
                 }
 
@@ -13307,6 +13335,9 @@ pub(crate) fn screen_thread_main(
             ) => {
                 screen.set_client_size(client_id, client_size);
                 screen.add_client(client_id, is_web_client)?;
+                if screen.pending_clients.contains_key(&client_id) {
+                    continue;
+                }
                 let pane_id = pane_id_to_focus.map(|(pane_id, is_plugin)| {
                     if is_plugin {
                         PaneId::Plugin(pane_id)
@@ -14412,6 +14443,14 @@ pub(crate) fn screen_thread_main(
                             should_be_in_place_if_hidden,
                             client_id,
                         )?;
+                        if screen.get_active_pane_id(&client_id) != Some(pane_id) {
+                            if let Some(c) = completion_tx.as_mut() {
+                                c.set_error_message(format!(
+                                    "Could not focus pane {:?} for client {}",
+                                    pane_id, client_id
+                                ));
+                            }
+                        }
                         screen.clear_bell_for_pane_id(pane_id, client_id);
                         screen.reconcile_single_pane_focus(client_id);
                         screen.sync_scroll_mode_on_focus(client_id)?;

@@ -10,7 +10,7 @@ use crate::os_input_output::ClientOsApi;
 use uuid::Uuid;
 use zellij_utils::{
     cli::{PromptCli, PromptElementCli, SubscribeCli, SubscribeFormat},
-    data::{PaneId, PipePopupPlacement},
+    data::{ClientId, PaneId, PipePopupPlacement},
     errors::prelude::*,
     input::actions::Action,
     ipc::{ClientToServerMsg, ExitReason, ServerToClientMsg},
@@ -18,9 +18,18 @@ use zellij_utils::{
 };
 
 pub fn start_cli_client(
+    os_input: Box<dyn ClientOsApi>,
+    session_name: &str,
+    actions: Vec<Action>,
+) -> i32 {
+    start_cli_client_with_target(os_input, session_name, actions, None)
+}
+
+pub fn start_cli_client_with_target(
     mut os_input: Box<dyn ClientOsApi>,
     session_name: &str,
     actions: Vec<Action>,
+    client_id: Option<ClientId>,
 ) -> i32 {
     let zellij_ipc_pipe: PathBuf = {
         let sock_dir = zellij_utils::consts::ZELLIJ_SOCK_DIR.clone();
@@ -66,6 +75,7 @@ pub fn start_cli_client(
                         floating,
                         in_place,
                         pane_id,
+                        client_id,
                         cwd,
                         pane_title,
                         popup,
@@ -80,7 +90,7 @@ pub fn start_cli_client(
             },
             action => {
                 if let Some(exit_status) =
-                    individual_messages_client(&mut os_input, action, pane_id)
+                    individual_messages_client(&mut os_input, action, pane_id, client_id)
                 {
                     return exit_status;
                 }
@@ -102,6 +112,7 @@ struct PipeRequest {
     floating: Option<bool>,
     in_place: Option<bool>,
     pane_id: Option<u32>,
+    client_id: Option<ClientId>,
     cwd: Option<PathBuf>,
     pane_title: Option<String>,
     popup: Option<PipePopupPlacement>,
@@ -141,7 +152,7 @@ impl PipeRequest {
                 popup_no_focus: self.popup_no_focus,
             },
             terminal_id: self.pane_id,
-            client_id: None,
+            client_id: self.client_id,
             is_cli_client: true,
         }
     }
@@ -433,6 +444,7 @@ pub fn start_prompt_client(
         floating: None,
         in_place: None,
         pane_id: Some(pane_id),
+        client_id: None,
         cwd: None,
         pane_title: Some(format!("prompt: {}", plan.element.name())),
         popup: Some(prompt_cli.placement()),
@@ -738,6 +750,7 @@ fn individual_messages_client(
     os_input: &mut Box<dyn ClientOsApi>,
     action: Action,
     pane_id: Option<u32>,
+    client_id: Option<ClientId>,
 ) -> Option<i32> {
     let is_blocking = matches!(
         &action,
@@ -749,7 +762,7 @@ fn individual_messages_client(
     let msg = ClientToServerMsg::Action {
         action,
         terminal_id: pane_id,
-        client_id: None,
+        client_id,
         is_cli_client: true,
     };
     os_input.send_to_server(msg);
@@ -759,8 +772,13 @@ fn individual_messages_client(
                 return None;
             },
             Some((ServerToClientMsg::Log { lines: log_lines }, _)) => {
-                log_lines.iter().for_each(|line| println!("{line}"));
-                return None;
+                let mut stdout = os_input.get_stdout_writer();
+                for line in log_lines {
+                    if writeln!(stdout, "{line}").is_err() {
+                        return Some(2);
+                    }
+                }
+                return stdout.flush().err().map(|_| 2);
             },
             Some((ServerToClientMsg::LogError { lines: log_lines }, _)) => {
                 log_lines.iter().for_each(|line| eprintln!("{line}"));
@@ -778,6 +796,7 @@ fn individual_messages_client(
                     return None;
                 },
             },
+            None => return Some(2),
             _ => {},
         }
     }

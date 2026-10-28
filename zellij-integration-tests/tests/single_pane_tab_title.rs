@@ -30,6 +30,7 @@ fn replace_pane_in_place_with_held_command(
         width: None,
         height: None,
         pinned: None,
+        scratchpad: false,
         stacked: false,
         blocking: false,
         block_until_exit_success: false,

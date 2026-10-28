@@ -262,6 +262,73 @@ fn new_pane_routing(
     }
 }
 
+fn cli_navigation_needs_client(action: &Action) -> bool {
+    match action {
+        Action::SwitchSession { .. }
+        | Action::ToggleSession
+        | Action::GoToPreviousSession
+        | Action::GoToNextSession
+        | Action::Detach
+        | Action::FocusPaneByPaneId { .. }
+        | Action::FocusTerminalPaneWithId { .. }
+        | Action::FocusPluginPaneWithId { .. }
+        | Action::FocusNextPane
+        | Action::FocusPreviousPane
+        | Action::FocusLastPane
+        | Action::SwitchFocus
+        | Action::MoveFocus { .. }
+        | Action::MoveFocusOrTab { .. }
+        | Action::GoToNextTab
+        | Action::GoToPreviousTab
+        | Action::GoToTab { .. }
+        | Action::GoToTabName { .. }
+        | Action::GoToTabById { .. }
+        | Action::ToggleTab
+        | Action::FocusHostSession
+        | Action::FocusGuestSession
+        | Action::LaunchOrFocusPlugin { .. }
+        | Action::NewPane { .. } => true,
+        Action::NewTab {
+            should_change_focus_to_new_tab,
+            ..
+        } => *should_change_focus_to_new_tab,
+        Action::NewBlockingPane { no_focus, .. }
+        | Action::EditFile { no_focus, .. }
+        | Action::NewFloatingPane { no_focus, .. }
+        | Action::NewTiledPane { no_focus, .. }
+        | Action::NewInPlacePane { no_focus, .. }
+        | Action::NewStackedPane { no_focus, .. }
+        | Action::Run { no_focus, .. }
+        | Action::LaunchPlugin { no_focus, .. }
+        | Action::NewTiledPluginPane { no_focus, .. }
+        | Action::NewFloatingPluginPane { no_focus, .. }
+        | Action::NewInPlacePluginPane { no_focus, .. } => !no_focus,
+        Action::SkipConfirm { action } => cli_navigation_needs_client(action),
+        _ => false,
+    }
+}
+
+fn cli_action_target(
+    state: &SessionState,
+    action: &Action,
+    requested: Option<ClientId>,
+    cli_client_id: ClientId,
+) -> Result<ClientId, String> {
+    if requested.is_some() || cli_navigation_needs_client(action) {
+        return state.cli_target(requested);
+    }
+    // Background and pane/session-targeted operations can run without an attached client.
+    Ok(state
+        .cli_target(None)
+        .ok()
+        .or_else(|| {
+            state
+                .get_last_active_client()
+                .filter(|id| state.is_attached_client(*id))
+        })
+        .unwrap_or(cli_client_id))
+}
+
 fn spawns_command_pane(action: &Action) -> bool {
     match action {
         Action::NewFloatingPane { command, .. }
@@ -3221,18 +3288,19 @@ pub(crate) fn route_thread_main(
                         } => {
                             let cli_client_id = client_id;
                             let client_id = if is_cli_client {
-                                // for cli clients, we want to default to the last active client
-                                // (i.e. the last client to have issued a keystroke) this is to
-                                // interpret actions that require a client_id (such as move focus,
-                                // detach, etc.) for which using the cli client id will not be
-                                // doing the right thing - using the last_active_client is almost
-                                // certainly correct in almost all cases
-                                session_state
-                                    .read()
-                                    .unwrap()
-                                    .get_last_active_client()
-                                    .or(maybe_client_id)
-                                    .unwrap_or(client_id)
+                                let target = cli_action_target(
+                                    &session_state.read().unwrap(),
+                                    &action,
+                                    maybe_client_id,
+                                    cli_client_id,
+                                );
+                                match target {
+                                    Ok(target) => target,
+                                    Err(error) => {
+                                        send_error_to_client(Some(cli_client_id), Some(&os_input), &error);
+                                        return Ok(false);
+                                    },
+                                }
                             } else {
                                 maybe_client_id.unwrap_or(client_id)
                             };
@@ -3298,7 +3366,7 @@ pub(crate) fn route_thread_main(
                                     is_cli_client,
                                 ) {
                                     Ok(route_action_should_break) => {
-                                        if route_action_should_break.0 {
+                                        if route_action_should_break.0 && !is_cli_client {
                                             should_break = true;
                                         }
                                     },
@@ -4375,6 +4443,52 @@ fn type_into_popup(senders: &ThreadSenders, client_id: ClientId, chars: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_navigation_target_is_strict_but_background_queries_are_not() {
+        let mut state = SessionState::new();
+        let cli = state.new_client();
+        assert!(cli_action_target(&state, &Action::FocusNextPane, None, cli).is_err());
+        assert_eq!(
+            cli_action_target(&state, &Action::ListClients, None, cli),
+            Ok(cli)
+        );
+        let mut new_tab = Action::NewTab {
+            tiled_layout: None,
+            floating_layouts: vec![],
+            swap_tiled_layouts: None,
+            swap_floating_layouts: None,
+            tab_name: None,
+            should_change_focus_to_new_tab: false,
+            cwd: None,
+            initial_panes: None,
+            first_pane_unblock_condition: None,
+        };
+        assert_eq!(cli_action_target(&state, &new_tab, None, cli), Ok(cli));
+        if let Action::NewTab {
+            should_change_focus_to_new_tab,
+            ..
+        } = &mut new_tab
+        {
+            *should_change_focus_to_new_tab = true;
+        }
+        assert!(cli_action_target(&state, &new_tab, None, cli).is_err());
+        let first = state.new_client();
+        state.set_client_data(first, zellij_utils::pane_size::Size::default(), false);
+        assert_eq!(
+            cli_action_target(&state, &Action::FocusNextPane, None, cli),
+            Ok(first)
+        );
+        let second = state.new_client();
+        state.set_client_data(second, zellij_utils::pane_size::Size::default(), false);
+        state.set_last_active_client(second);
+        assert!(cli_action_target(&state, &Action::FocusNextPane, None, cli).is_err());
+        assert_eq!(
+            cli_action_target(&state, &Action::FocusNextPane, Some(first), cli),
+            Ok(first)
+        );
+        assert!(cli_action_target(&state, &Action::ListClients, Some(cli), cli).is_err());
+    }
 
     fn write_key(bare_key: BareKey, modifiers: &[KeyModifier], bytes: Vec<u8>) -> Action {
         let key = zellij_utils::data::KeyWithModifier::new_with_modifiers(

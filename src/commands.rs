@@ -530,6 +530,7 @@ pub(crate) fn send_action_to_session(
     cli_action: zellij_utils::cli::CliAction,
     requested_session_name: Option<String>,
     config: Option<Config>,
+    client_id: Option<zellij_utils::data::ClientId>,
 ) {
     if matches!(cli_action, zellij_utils::cli::CliAction::ToggleTrayIcon) {
         match toggle_tray_icon_at(&zellij_utils::consts::app_control_socket()) {
@@ -556,7 +557,7 @@ pub(crate) fn send_action_to_session(
                     std::process::exit(1);
                 }
             }
-            attach_with_cli_client(cli_action, &session_name, config);
+            attach_with_cli_client(cli_action, &session_name, config, client_id);
         },
         ActiveSession::Many => {
             let existing_sessions: Vec<String> = get_sessions()
@@ -566,7 +567,7 @@ pub(crate) fn send_action_to_session(
                 .collect();
             if let Some(session_name) = requested_session_name {
                 if existing_sessions.contains(&session_name) {
-                    attach_with_cli_client(cli_action, &session_name, config);
+                    attach_with_cli_client(cli_action, &session_name, config, client_id);
                 } else {
                     eprintln!(
                         "Session '{}' not found. The following sessions are active:",
@@ -576,7 +577,7 @@ pub(crate) fn send_action_to_session(
                     std::process::exit(1);
                 }
             } else if let Ok(session_name) = envs::get_session_name() {
-                attach_with_cli_client(cli_action, &session_name, config);
+                attach_with_cli_client(cli_action, &session_name, config, client_id);
             } else {
                 eprintln!("Please specify the session name to send actions to. The following sessions are active:");
                 list_sessions(false, false, true);
@@ -688,15 +689,17 @@ fn attach_with_cli_client(
     cli_action: zellij_utils::cli::CliAction,
     session_name: &str,
     config: Option<Config>,
+    client_id: Option<zellij_utils::data::ClientId>,
 ) {
     let os_input = get_os_input(zellij_client::os_input_output::get_cli_client_os_input);
     let get_current_dir = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match Action::actions_from_cli(cli_action, Box::new(get_current_dir), config) {
         Ok(actions) => {
-            let exit_status = zellij_client::cli_client::start_cli_client(
+            let exit_status = zellij_client::cli_client::start_cli_client_with_target(
                 Box::new(os_input),
                 session_name,
                 actions,
+                client_id,
             );
             std::process::exit(exit_status);
         },

@@ -315,6 +315,36 @@ fn create_new_screen_with_kitty_graphics(
     screen
 }
 
+#[test]
+fn navigation_completion_rejects_disconnected_client_without_retargeting() {
+    let screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.connected_clients.borrow_mut().insert(1, false);
+    for make_event in [
+        |id, completion| {
+            ScreenInstruction::FocusPaneWithId(PaneId::Terminal(1), true, false, id, completion)
+        },
+        |id, completion| ScreenInstruction::MoveFocusLeft(id, completion),
+        |id, completion| ScreenInstruction::GoToTab(1, Some(id), completion),
+    ] {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut event = make_event(2, Some(crate::route::NotificationEnd::new(tx)));
+        assert!(screen.reject_disconnected_navigation(&mut event));
+        drop(event);
+        assert!(rx
+            .blocking_recv()
+            .unwrap()
+            .error_message
+            .unwrap()
+            .contains("2"));
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let mut event = make_event(1, Some(crate::route::NotificationEnd::new(tx)));
+        assert!(!screen.reject_disconnected_navigation(&mut event));
+    }
+    let mut startup = ScreenInstruction::GoToTab(1, Some(2), None);
+    assert!(!screen.reject_disconnected_navigation(&mut startup));
+}
+
 type TtyStdinBytes = Arc<Mutex<BTreeMap<u32, Vec<u8>>>>;
 type ServerReceiver = Receiver<(ServerInstruction, ErrorContext)>;
 
@@ -412,6 +442,7 @@ fn create_new_screen_with_capture(
 
 fn seed_first_client_size(mut screen: Screen, size: Size) -> Screen {
     screen.set_client_size(1, size);
+    screen.add_client(1, false).unwrap();
     screen
 }
 
@@ -863,7 +894,13 @@ impl MockScreen {
         config.options.stacked_pane_list = Some(false);
         let main_client_id = 1;
 
-        let _ = to_screen.send(ScreenInstruction::RecomputeTabSize(main_client_id, size));
+        let _ = to_screen.send(ScreenInstruction::AddClient(
+            main_client_id,
+            false,
+            size,
+            None,
+            None,
+        ));
 
         let received_background_jobs = Arc::new(Mutex::new(vec![]));
         std::thread::Builder::new()
@@ -1009,6 +1046,154 @@ fn new_tab(screen: &mut Screen, pid: u32, tab_index: usize) {
             None,
         )
         .expect("TEST");
+}
+
+fn apply_startup_layout(screen: &mut Screen, tab_id: usize, client_id: ClientId) {
+    screen
+        .apply_layout(
+            TiledPaneLayout::default(),
+            vec![],
+            vec![(tab_id as u32 + 1, None)],
+            vec![],
+            HashMap::new(),
+            tab_id,
+            true,
+            (client_id, false),
+            None,
+        )
+        .expect("startup layout");
+}
+
+#[test]
+fn startup_layout_attaches_real_client_after_early_cli_disconnect() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    screen.new_tab(0, (vec![], vec![]), None, Some(1)).unwrap();
+
+    // A read-only CLI connection can finish while the real client's PTYs are spawning.
+    screen.remove_client(2).unwrap();
+    apply_startup_layout(&mut screen, 0, 1);
+
+    assert_eq!(screen.get_active_pane_id(&1), Some(PaneId::Terminal(1)));
+    assert_eq!(screen.active_tab_ids.get(&1), Some(&0));
+    assert!(screen.connected_clients.borrow().contains_key(&1));
+    assert!(!screen.connected_clients.borrow().contains_key(&2));
+}
+
+#[test]
+fn startup_layout_does_not_resurrect_disconnected_client() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    for tab_id in [0, 1] {
+        screen
+            .new_tab(tab_id, (vec![], vec![]), None, Some(1))
+            .unwrap();
+    }
+    screen.remove_client(1).unwrap();
+
+    for tab_id in [1, 0] {
+        apply_startup_layout(&mut screen, tab_id, 1);
+        assert!(!screen.active_tab_ids.contains_key(&1));
+        assert!(!screen.connected_clients.borrow().contains_key(&1));
+        assert!(screen.tabs.get(&tab_id).unwrap().has_no_connected_clients());
+    }
+}
+
+#[test]
+fn startup_layouts_attach_clients_in_completion_order_not_id_order() {
+    let mut screen = create_non_mirrored_screen(Size { cols: 80, rows: 24 });
+    screen.add_client(2, false).unwrap();
+    screen.new_tab(0, (vec![], vec![]), None, Some(1)).unwrap();
+    screen.new_tab(1, (vec![], vec![]), None, Some(2)).unwrap();
+
+    apply_startup_layout(&mut screen, 1, 2);
+    let second_client_tab = screen.active_tab_ids[&2];
+    screen.remove_client(3).unwrap();
+    apply_startup_layout(&mut screen, 0, 1);
+
+    assert!(screen.active_tab_ids.contains_key(&1));
+    assert_eq!(screen.active_tab_ids[&2], second_client_tab);
+    assert!(screen.get_active_pane_id(&1).is_some());
+    assert!(screen.connected_clients.borrow().contains_key(&1));
+    assert!(screen.connected_clients.borrow().contains_key(&2));
+    assert!(!screen.connected_clients.borrow().contains_key(&3));
+}
+
+#[test]
+fn startup_layout_for_disconnected_client_does_not_retarget_survivor() {
+    for mirrored in [false, true] {
+        let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+        screen.session_is_mirrored = mirrored;
+        new_tab(&mut screen, 1, 0);
+        screen.new_tab(1, (vec![], vec![]), None, Some(1)).unwrap();
+        screen.remove_client(1).unwrap();
+        screen.add_client(2, false).unwrap();
+
+        apply_startup_layout(&mut screen, 1, 1);
+
+        assert_eq!(screen.get_active_pane_id(&2), Some(PaneId::Terminal(1)));
+        assert_eq!(screen.active_tab_ids.get(&2), Some(&0));
+        assert!(!screen.active_tab_ids.contains_key(&1));
+        assert!(!screen.connected_clients.borrow().contains_key(&1));
+        assert!(screen.tabs.get(&1).unwrap().has_no_connected_clients());
+    }
+}
+
+#[test]
+fn reconnect_restores_last_active_tab_after_startup() {
+    let mut screen = create_new_screen(Size { cols: 80, rows: 24 }, true, true);
+    new_tab(&mut screen, 1, 0);
+    new_tab(&mut screen, 2, 1);
+    screen.remove_client(1).unwrap();
+    screen.add_client(2, false).unwrap();
+    assert_eq!(screen.active_tab_ids.get(&2), Some(&1));
+}
+
+#[test]
+fn startup_layout_routes_input_after_early_cli_query_and_disconnect() {
+    let mut mock_screen = MockScreen::new(Size { cols: 80, rows: 24 });
+    let writer = mock_screen.pty_writer_receiver.take().unwrap();
+    let screen_thread = mock_screen.run_without_tabs();
+    for event in [
+        ScreenInstruction::NewTab(
+            None,
+            None,
+            Some(TiledPaneLayout::default()),
+            vec![],
+            None,
+            (Some(vec![]), Some(vec![])),
+            None,
+            false,
+            true,
+            (1, false),
+            None,
+        ),
+        ScreenInstruction::ListClientsMetadata(None, 2, None),
+        ScreenInstruction::RemoveClient(2),
+        ScreenInstruction::ApplyLayout(
+            TiledPaneLayout::default(),
+            vec![],
+            vec![(1, None)],
+            vec![],
+            HashMap::new(),
+            0,
+            true,
+            (1, false),
+            None,
+            None,
+        ),
+        ScreenInstruction::WriteCharacter(None, b"startup input".to_vec(), false, 1, None),
+        ScreenInstruction::Exit,
+    ] {
+        mock_screen.to_screen.send(event).unwrap();
+    }
+    screen_thread.join().unwrap();
+    let input_reached_pane = writer.try_iter().any(|(event, _)| {
+        matches!(event, PtyWriteInstruction::Write(bytes, 1, _) if bytes == b"startup input")
+    });
+    mock_screen.teardown(vec![]);
+    assert!(
+        input_reached_pane,
+        "input must reach the real client's active pane"
+    );
 }
 
 #[test]
@@ -2836,7 +3021,7 @@ pub fn send_cli_resize_action_to_screen() {
 #[test]
 pub fn send_cli_focus_next_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -2869,7 +3054,7 @@ pub fn send_cli_focus_next_pane_action() {
 #[test]
 pub fn send_cli_focus_previous_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -2902,7 +3087,7 @@ pub fn send_cli_focus_previous_pane_action() {
 #[test]
 pub fn send_cli_focus_last_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![
@@ -2951,7 +3136,7 @@ pub fn send_cli_focus_last_pane_action() {
 #[test]
 pub fn send_cli_move_focus_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -2986,7 +3171,7 @@ pub fn send_cli_move_focus_pane_action() {
 #[test]
 pub fn send_cli_move_focus_or_tab_pane_action() {
     let size = Size { cols: 80, rows: 20 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -4333,7 +4518,7 @@ pub fn send_cli_new_tab_action_with_name_and_layout() {
 #[test]
 pub fn send_cli_next_tab_action() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -4371,7 +4556,7 @@ pub fn send_cli_next_tab_action() {
 #[test]
 pub fn send_cli_previous_tab_action() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -4407,7 +4592,7 @@ pub fn send_cli_previous_tab_action() {
 #[test]
 pub fn send_cli_goto_tab_action() {
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10; // fake client id should not appear in the screen's state
+    let client_id = 1;
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
@@ -8206,21 +8391,14 @@ fn integration_subscribe_with_ansi_flag() {
 
 #[test]
 pub fn background_plugin_receives_broadcasts_regardless_of_active_tab() {
-    // Tab 0: plugin pane 2 (from new_tab_with_plugins, queued before run)
-    // Tab 1: plugin pane 3 (from new_tab_with_plugins, queued before run)
-    // Tab 2: terminal panes only (from run, starts screen thread)
-    // After run, client is on tab 2. Switch to tab 0 (plugin 2).
-    // Background plugin 99 should also receive updates.
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10;
-
     let mut mock_screen = MockScreen::new(size);
+    let client_id = mock_screen.main_client_id;
     mock_screen.new_tab_with_plugins(vec![2]);
     mock_screen.new_tab_with_plugins(vec![3]);
     let session_metadata = mock_screen.clone_session_metadata();
     let screen_thread = mock_screen.run(None, vec![]);
 
-    // Register background plugin 99 with the main_client_id (1), not the CLI client_id (10)
     let main_client_id = mock_screen.main_client_id;
     let mut bg_subs = HashSet::new();
     bg_subs.insert(EventType::TabUpdate);
@@ -8313,15 +8491,9 @@ pub fn background_plugin_receives_broadcasts_regardless_of_active_tab() {
 
 #[test]
 pub fn tab_switch_only_updates_active_tab_plugins() {
-    // Tab 0: plugin pane 2 (from new_tab_with_plugins)
-    // Tab 1: plugin pane 3 (from new_tab_with_plugins)
-    // Tab 2: terminal panes only (from run)
-    // After run, client is on tab 2. Switch to tab 0 (plugin 2).
-    // Only plugin 2 should receive updates; plugin 3 should not.
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10;
-
     let mut mock_screen = MockScreen::new(size);
+    let client_id = mock_screen.main_client_id;
     mock_screen.new_tab_with_plugins(vec![2]);
     mock_screen.new_tab_with_plugins(vec![3]);
     let session_metadata = mock_screen.clone_session_metadata();
@@ -8432,12 +8604,9 @@ pub fn closing_tab_updates_input_modes_of_destination_tab_plugins() {
 
 #[test]
 pub fn suppressed_plugin_keeps_receiving_events() {
-    // Tab 0: plugin panes 2 and 3, the client switches here and plugin 2 hides itself.
-    // It should still hear about mode and tab changes so it can decide to show itself again.
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10;
-
     let mut mock_screen = MockScreen::new(size);
+    let client_id = mock_screen.main_client_id;
     mock_screen.new_tab_with_plugins(vec![2, 3]);
     let session_metadata = mock_screen.clone_session_metadata();
     let screen_thread = mock_screen.run(None, vec![]);
@@ -8503,13 +8672,9 @@ pub fn suppressed_plugin_keeps_receiving_events() {
 
 #[test]
 pub fn inactive_tab_plugins_get_fresh_state_on_activation() {
-    // Tab 0: plugin pane 2 (from new_tab_with_plugins)
-    // Tab 1: terminal panes only (from run, client starts here)
-    // Switch to tab 0 → plugin 2 becomes active and receives TabUpdate with both tabs.
     let size = Size { cols: 80, rows: 10 };
-    let client_id = 10;
-
     let mut mock_screen = MockScreen::new(size);
+    let client_id = mock_screen.main_client_id;
     mock_screen.new_tab_with_plugins(vec![2]);
     let session_metadata = mock_screen.clone_session_metadata();
     let screen_thread = mock_screen.run(None, vec![]);
