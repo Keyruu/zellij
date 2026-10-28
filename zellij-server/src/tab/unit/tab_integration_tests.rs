@@ -14783,6 +14783,45 @@ fn stack_list_orientation_survives_degroupify_groupify_cycle() {
 }
 
 #[test]
+fn vertical_stack_list_titles_center_each_member_independently() {
+    let size = Size { cols: 40, rows: 20 };
+    let layout = r#"
+        layout {
+            pane stacked=true {
+                pane name="foo" focus=true
+                pane name="terminal"
+            }
+        }
+    "#;
+    let (layout, _) = Layout::from_kdl(layout, Some("file_name.kdl".into()), None, None)
+        .unwrap()
+        .template
+        .unwrap();
+    let mut tab = create_new_tab_with_stacked_pane_list(
+        size,
+        ModeInfo::default(),
+        true,
+        Some((layout, vec![(1, None), (2, None)])),
+    );
+    let mut output = Output::default();
+    tab.render(&mut output, None).unwrap();
+    let snapshot = take_snapshot(
+        output.serialize().unwrap().get(&1).unwrap().ansi(),
+        size.rows,
+        size.cols,
+        Palette::default(),
+    );
+    let foo = snapshot.lines().find(|row| row.contains("foo")).unwrap();
+    let terminal = snapshot
+        .lines()
+        .find(|row| row.contains("terminal"))
+        .unwrap();
+    let foo_center = foo.find("foo").unwrap() + "foo".len() / 2;
+    let terminal_center = terminal.find("terminal").unwrap() + "terminal".len() / 2;
+    assert!(foo_center.abs_diff(terminal_center) <= 1, "{}", snapshot);
+}
+
+#[test]
 fn horizontal_stack_list_member_at_point_follows_tab_widths() {
     let size = Size {
         cols: 121,
@@ -14825,10 +14864,10 @@ fn horizontal_stack_list_member_at_point_follows_tab_widths() {
         .saturating_sub(offset.left + offset.right);
     let entry_layout = tab.stack_list_horizontal_entry_layout(list, entry_cols);
     let tab_widths: Vec<usize> = entry_layout.iter().map(|entry| entry.width).collect();
-    assert_eq!(tab_widths, vec![9, 14, 8]);
+    assert_eq!(tab_widths, vec![5, 10, 4]);
     let members = list.members.clone();
 
-    let second_tab_start = entry_x + 9;
+    let second_tab_start = entry_x + 5;
     let second_member = list.members[1];
     assert_eq!(
         tab.stack_list_member_at_point(

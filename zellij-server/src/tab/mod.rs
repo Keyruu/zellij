@@ -2062,12 +2062,6 @@ impl Tab {
                 .cols
                 .as_usize()
                 .saturating_sub(visible_content_offset.left + visible_content_offset.right);
-            let widest_member_title = list
-                .members
-                .iter()
-                .map(|member| self.stack_list_member_label_width(&list, member))
-                .max()
-                .unwrap_or(0);
             let stack_is_focused = active_panes.values().any(|p_id| *p_id == list.visible);
             let entries = match list.orientation {
                 StackListOrientation::Vertical => list
@@ -2076,7 +2070,7 @@ impl Tab {
                     .map(|member| StackListEntryLayout {
                         member: *member,
                         x: 0,
-                        label_width: widest_member_title,
+                        label_width: self.stack_list_member_label_width(&list, member),
                         width: entry_cols,
                     })
                     .collect(),

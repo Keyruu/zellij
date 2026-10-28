@@ -84,9 +84,8 @@ pub struct StackListEntry {
 }
 
 impl StackListEntry {
-    const SELECTION_MARKER: &'static str = "> ";
     const CORNER_PADDING: usize = 1;
-    pub const OVERHEAD: usize = Self::SELECTION_MARKER.len() + 2 * (1 + Self::CORNER_PADDING);
+    pub const OVERHEAD: usize = 2 * Self::CORNER_PADDING;
 }
 
 pub struct FrameParams {
@@ -843,40 +842,6 @@ impl PaneFrame {
     }
     fn render_stack_list_entry(&self, entry: &StackListEntry) -> Vec<TerminalCharacter> {
         let usable_cols = self.geom.cols;
-        if usable_cols < StackListEntry::OVERHEAD {
-            let marker = if entry.is_selected && usable_cols > 0 {
-                ">"
-            } else {
-                ""
-            };
-            let label = graphemes::truncate_end(&entry.label, usable_cols - marker.len(), "…");
-            let text = format!("{}{}", marker, label);
-            let mut line = foreground_color(&text, self.color);
-            line.extend(
-                std::iter::repeat(EMPTY_TERMINAL_CHARACTER)
-                    .take(usable_cols - graphemes::display_width(&text)),
-            );
-            return line;
-        }
-        let selection_marker = StackListEntry::SELECTION_MARKER;
-        let marker_width = selection_marker.width();
-        let corner_padding = StackListEntry::CORNER_PADDING;
-        let corner_overhead = StackListEntry::OVERHEAD - marker_width;
-        let inner_width = entry
-            .width
-            .min(usable_cols.saturating_sub(marker_width + corner_overhead));
-        let content = graphemes::truncate_end(&entry.label, inner_width, "…").into_owned();
-        let full_width_entry_length = marker_width + corner_overhead + inner_width;
-        let entry_start = usable_cols.saturating_sub(full_width_entry_length) / 2;
-        let left_budget = entry_start;
-        let (mut focus_part, focus_length) = self
-            .bracketed_focus_indicator(left_budget)
-            .unwrap_or((vec![], 0));
-        let mut line = Vec::with_capacity(usable_cols);
-        line.append(&mut focus_part);
-        for _ in focus_length..left_budget {
-            line.push(EMPTY_TERMINAL_CHARACTER);
-        }
         let unfocused_color = self.style.colors.frame_unselected.map(|frame| frame.base);
         let style_entry_text = |text: &str| {
             if entry.is_selected || entry.is_emphasized {
@@ -887,14 +852,29 @@ impl PaneFrame {
                 dimmed_foreground_color(text, unfocused_color)
             }
         };
-        if entry.is_selected {
-            line.append(&mut foreground_color(selection_marker, None));
-        } else {
-            for _ in 0..marker_width {
-                line.push(EMPTY_TERMINAL_CHARACTER);
-            }
+        if usable_cols < StackListEntry::OVERHEAD {
+            let content = graphemes::truncate_end(&entry.label, usable_cols, "…");
+            let mut line = style_entry_text(&content);
+            line.extend(
+                std::iter::repeat(EMPTY_TERMINAL_CHARACTER)
+                    .take(usable_cols - graphemes::display_width(&content)),
+            );
+            return line;
         }
-        line.append(&mut foreground_color(self.left_vertical(), None));
+        let corner_padding = StackListEntry::CORNER_PADDING;
+        let inner_width = entry.width.min(usable_cols - StackListEntry::OVERHEAD);
+        let content = graphemes::truncate_end(&entry.label, inner_width, "…").into_owned();
+        let full_width_entry_length = StackListEntry::OVERHEAD + inner_width;
+        let entry_start = usable_cols.saturating_sub(full_width_entry_length) / 2;
+        let left_budget = entry_start;
+        let (mut focus_part, focus_length) = self
+            .bracketed_focus_indicator(left_budget)
+            .unwrap_or((vec![], 0));
+        let mut line = Vec::with_capacity(usable_cols);
+        line.append(&mut focus_part);
+        for _ in focus_length..left_budget {
+            line.push(EMPTY_TERMINAL_CHARACTER);
+        }
         for _ in 0..corner_padding {
             line.push(EMPTY_TERMINAL_CHARACTER);
         }
@@ -906,7 +886,6 @@ impl PaneFrame {
         for _ in 0..corner_padding {
             line.push(EMPTY_TERMINAL_CHARACTER);
         }
-        line.append(&mut foreground_color(self.right_vertical(), None));
         let mut occupied_columns = entry_start + full_width_entry_length;
         let (mut scroll_part, scroll_length) = self
             .bracketed_scroll_indicator(usable_cols.saturating_sub(occupied_columns))
@@ -1715,6 +1694,45 @@ mod tests {
                         assert!(characters_to_string(&cells).contains(label));
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn stack_list_titles_center_independently_without_markers_or_borders() {
+        let frame = title_frame("", 20, true);
+        for (label, expected_start) in [("foo", 8), ("terminal", 6)] {
+            for selected in [false, true] {
+                let entry = StackListEntry {
+                    width: graphemes::display_width(label),
+                    label: label.to_owned(),
+                    is_selected: selected,
+                    is_emphasized: false,
+                    stack_is_focused: true,
+                };
+                let row = characters_to_string(&frame.render_stack_list_entry(&entry));
+                assert_eq!(row.find(label), Some(expected_start));
+                assert!(!['|', '>', '│'].iter().any(|glyph| row.contains(*glyph)));
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_stack_list_titles_keep_their_padding_without_markers_or_borders() {
+        let label = "foo";
+        for cols in 0..=graphemes::display_width(label) + StackListEntry::OVERHEAD {
+            let frame = title_frame("", cols, true);
+            let entry = StackListEntry {
+                width: graphemes::display_width(label),
+                label: label.to_owned(),
+                is_selected: true,
+                is_emphasized: false,
+                stack_is_focused: true,
+            };
+            let row = characters_to_string(&frame.render_stack_list_entry(&entry));
+            assert!(!['|', '>', '│'].iter().any(|glyph| row.contains(*glyph)));
+            if cols == graphemes::display_width(label) + StackListEntry::OVERHEAD {
+                assert_eq!(row, " foo ");
             }
         }
     }
