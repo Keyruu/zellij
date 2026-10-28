@@ -1040,6 +1040,7 @@ Config {
                     near_current_pane: false,
                     no_focus: false,
                     tab_id: None,
+                    scratchpad: false,
                 },
                 SwitchToMode {
                     input_mode: Normal,
@@ -7032,6 +7033,7 @@ Config {
                             near_current_pane: false,
                             no_focus: false,
                             tab_id: None,
+                            scratchpad: false,
                         },
                     ),
                 ],

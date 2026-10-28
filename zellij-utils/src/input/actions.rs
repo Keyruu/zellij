@@ -319,6 +319,13 @@ pub enum Action {
         near_current_pane: bool,
         no_focus: bool,
         tab_id: Option<usize>,
+        /// Scratchpad semantics: focus an existing scratchpad floating pane
+        /// with the same pane_name if one is open in the current tab (or
+        /// toggle it closed if already focused), evicting sibling
+        /// scratchpads; otherwise evict siblings and spawn one. Sibling
+        /// non-scratchpad floats (e.g. layout-spawned lazygit) are left
+        /// alone. No-op if no pane_name was given (behaves like a plain spawn).
+        scratchpad: bool,
     },
     /// Open a new tiled (embedded, non-floating) pane
     /// Returns: Created pane ID (format: terminal_<id> or plugin_<id>)
@@ -1322,6 +1329,7 @@ impl Action {
                 width,
                 height,
                 pinned,
+                scratchpad,
                 stacked,
                 blocking,
                 block_until_exit_success,
@@ -1517,6 +1525,7 @@ impl Action {
                             near_current_pane,
                             no_focus,
                             tab_id,
+                            scratchpad,
                         }])
                     } else if in_place {
                         Ok(vec![Action::NewInPlacePane {
@@ -1562,6 +1571,7 @@ impl Action {
                             near_current_pane,
                             no_focus,
                             tab_id,
+                            scratchpad,
                         }])
                     } else if in_place {
                         Ok(vec![Action::NewInPlacePane {
@@ -4218,6 +4228,7 @@ mod tests {
             borderless: None,
             tab_id: None,
             border_style: border_style.map(|s| s.to_string()),
+            scratchpad: false,
             notify: Default::default(),
         }
     }
@@ -4381,6 +4392,7 @@ mod tests {
     #[test]
     fn test_new_pane_tiled_with_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: Some(Direction::Right),
             command: vec![],
             plugin: None,
@@ -4427,6 +4439,7 @@ mod tests {
     #[test]
     fn test_new_pane_tiled_without_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: None,
@@ -4473,6 +4486,7 @@ mod tests {
     #[test]
     fn test_new_in_place_pane_with_pane_id_to_replace() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: None,
@@ -4521,6 +4535,7 @@ mod tests {
     #[test]
     fn test_new_in_place_pane_with_malformed_pane_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: None,
@@ -4560,6 +4575,7 @@ mod tests {
     #[test]
     fn test_new_pane_floating_with_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: None,
@@ -4606,6 +4622,7 @@ mod tests {
     #[test]
     fn test_new_pane_stacked_with_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec!["ls".into()],
             plugin: None,
@@ -4652,6 +4669,7 @@ mod tests {
     #[test]
     fn test_new_pane_blocking_with_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec!["ls".into()],
             plugin: None,
@@ -4764,6 +4782,7 @@ mod tests {
     #[test]
     fn test_new_pane_plugin_tiled_with_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: Some("zellij:strider".into()),
@@ -4810,6 +4829,7 @@ mod tests {
     #[test]
     fn test_new_pane_plugin_floating_with_tab_id() {
         let cli_action = CliAction::NewPane {
+            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: Some("zellij:strider".into()),

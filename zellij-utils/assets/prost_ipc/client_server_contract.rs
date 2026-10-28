@@ -1047,6 +1047,8 @@ pub struct NewFloatingPaneAction {
     pub tab_id: ::core::option::Option<u32>,
     #[prost(bool, tag="9")]
     pub no_focus: bool,
+    #[prost(bool, tag="10")]
+    pub scratchpad: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

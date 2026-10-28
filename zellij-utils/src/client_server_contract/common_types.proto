@@ -567,6 +567,7 @@ message NewFloatingPaneAction {
   bool near_current_pane = 7;
   optional uint32 tab_id = 8;
   bool no_focus = 9;
+  bool scratchpad = 10;
 }
 
 message NewTiledPaneAction {
