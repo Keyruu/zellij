@@ -4199,7 +4199,6 @@ mod tests {
 
     fn new_pane_cli_action(floating: bool, border_style: Option<&str>) -> CliAction {
         CliAction::NewPane {
-            scratchpad: false,
             direction: None,
             command: vec![],
             plugin: None,
