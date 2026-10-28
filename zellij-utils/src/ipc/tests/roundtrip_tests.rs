@@ -16,7 +16,7 @@ use crate::input::layout::{
 use crate::input::mouse::{MouseEvent, MouseEventType};
 use crate::input::options::{
     Clipboard, HostNotificationProtocol, NestedSessionHandling, OnForceClose, Options,
-    PaneFrameStyle,
+    PaneFrameStyle, StackListOrientation,
 };
 use crate::ipc::{
     ClientToServerMsg, ColorRegister, ExitReason, MobileActivePanePayload, MobilePanePayload,
@@ -545,6 +545,7 @@ fn test_client_messages() {
                 web_sharing: Some(WebSharing::On),
                 stacked_resize: Some(true),
                 stacked_pane_list: Some(true),
+                stacked_pane_list_orientation: Some(StackListOrientation::Horizontal),
                 show_startup_tips: Some(true),
                 show_release_notes: Some(true),
                 advanced_mouse_actions: Some(true),
@@ -4939,4 +4940,36 @@ fn clear_resurrect_command_wire_roundtrip() {
         pane_id: PaneId::Terminal(3),
         resurrect: None,
     });
+}
+
+#[test]
+fn stacked_pane_list_orientation_wire_roundtrip() {
+    use prost::Message;
+
+    let original = crate::input::options::Options {
+        stacked_pane_list_orientation: Some(StackListOrientation::Horizontal),
+        ..Default::default()
+    };
+
+    let proto: crate::client_server_contract::client_server_contract::Options = original.into();
+    assert_eq!(
+        proto.stacked_pane_list_orientation.as_deref(),
+        Some("horizontal"),
+        "wire encoding should be the lowercase Display form"
+    );
+
+    let bytes = proto.encode_to_vec();
+    let decoded =
+        crate::client_server_contract::client_server_contract::Options::decode(&bytes[..])
+            .expect("Failed to decode protobuf bytes");
+
+    let roundtrip: Options = decoded
+        .try_into()
+        .expect("Failed to convert decoded protobuf back to Rust");
+
+    assert_eq!(
+        roundtrip.stacked_pane_list_orientation,
+        Some(StackListOrientation::Horizontal),
+        "stacked_pane_list_orientation must survive IPC roundtrip"
+    );
 }
