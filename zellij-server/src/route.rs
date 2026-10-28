@@ -1063,13 +1063,8 @@ fn route_action_with_origin(
                 let run_cmd = run_command
                     .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                     .or_else(|| default_shell.clone());
-                let client_tab_index_or_paneid = new_pane_routing(
-                    no_focus,
-                    near_current_pane,
-                    tab_id,
-                    pane_id,
-                    client_id,
-                );
+                let client_tab_index_or_paneid =
+                    new_pane_routing(no_focus, near_current_pane, tab_id, pane_id, client_id);
                 senders
                     .send_to_pty(PtyInstruction::SpawnTerminal(
                         run_cmd,

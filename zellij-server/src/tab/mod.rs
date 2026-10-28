@@ -2803,7 +2803,7 @@ impl Tab {
                         client_id_or_tab_index,
                         completion_tx,
                         false, // set_blocking
-                        None, // origin_pane_id
+                        None,  // origin_pane_id
                         false, // is_scratchpad
                     );
                     self.senders

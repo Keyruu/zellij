@@ -19180,6 +19180,7 @@ fn drawn_terminal_action(
         near_current_pane: false,
         no_focus: false,
         tab_id: None,
+        scratchpad: false,
     }
 }
 

@@ -383,7 +383,7 @@ pub enum ScreenInstruction {
         ClientTabIndexOrPaneId,
         Option<NotificationEnd>, // completion signal
         bool,                    // set_blocking
-        bool, // is_scratchpad — mark the pane as a scratchpad on creation
+        bool,                    // is_scratchpad — mark the pane as a scratchpad on creation
     ),
     OpenInPlaceEditor(PaneId, ClientTabIndexOrPaneId),
     TogglePaneEmbedOrFloating(ClientId, Option<NotificationEnd>),
@@ -6514,11 +6514,7 @@ impl Screen {
         Ok(())
     }
 
-    fn find_floating_pane_by_name(
-        &self,
-        tab_index: usize,
-        pane_name: &str,
-    ) -> Option<PaneId> {
+    fn find_floating_pane_by_name(&self, tab_index: usize, pane_name: &str) -> Option<PaneId> {
         let tab = self.tabs.get(&tab_index)?;
         for (pane_id, pane) in tab.get_floating_panes() {
             if pane.current_title() == pane_name {
@@ -11291,14 +11287,13 @@ pub(crate) fn screen_thread_main(
                 // routing the active tab may have shifted under us, so fall
                 // back to whichever tab contains the pane.
                 if is_scratchpad {
-                    let tab_to_mark = target_tab_index
-                        .or_else(|| {
-                            screen
-                                .tabs
-                                .iter()
-                                .find(|(_, tab)| tab.has_pane_with_pid(&pid))
-                                .map(|(idx, _)| *idx)
-                        });
+                    let tab_to_mark = target_tab_index.or_else(|| {
+                        screen
+                            .tabs
+                            .iter()
+                            .find(|(_, tab)| tab.has_pane_with_pid(&pid))
+                            .map(|(idx, _)| *idx)
+                    });
                     if let Some(tab_index) = tab_to_mark {
                         if let Some(tab) = screen.tabs.get_mut(&tab_index) {
                             tab.set_pane_is_scratchpad(pid, true);

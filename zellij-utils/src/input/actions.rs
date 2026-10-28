@@ -4225,6 +4225,7 @@ mod tests {
             borderless: None,
             tab_id: None,
             border_style: border_style.map(|s| s.to_string()),
+            scratchpad: false,
             notify: Default::default(),
         }
     }

@@ -10824,6 +10824,7 @@ fn context_menu_parses_explicit_targets_and_new_by_id_actions() {
                 near_current_pane: false,
                 no_focus: false,
                 tab_id: None,
+                scratchpad: false,
             }
             .into()],
             vec![ContextMenuAction::ClickedTab(ClickedTabAction::Move(

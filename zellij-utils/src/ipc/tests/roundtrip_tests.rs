@@ -3481,6 +3481,7 @@ fn test_client_messages() {
             near_current_pane: false,
             no_focus: false,
             tab_id: None,
+            scratchpad: false,
         },
         terminal_id: Some(1),
         client_id: Some(100),
